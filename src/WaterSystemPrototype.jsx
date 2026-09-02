@@ -12,6 +12,7 @@ import {
   residentLogin, residentGoogleLogin, residentLogout,
   updateResidentProfile, resetResidentPassword, resolveAlertApi, unresolveAlertApi,
   createHousehold, fetchAlerts,
+  fetchLeakReports, resolveLeakReportApi, unresolveLeakReportApi,
 } from "./api";
 import { residentToHousehold } from "./databridge.js";
 import { jwtDecode } from "jwt-decode";
@@ -58,6 +59,7 @@ export default function WaterSystemPrototype() {
   // shared state — populated either from API or from mock data
   const [households, setHouseholds] = useState([]);
   const [alerts, setAlerts] = useState([]);
+  const [leakReports, setLeakReports] = useState([]);
   const [activeResidentId, setActiveResidentId] = useState(residentSession?.householdId || null);
 
   const [toast, setToast] = useState(null);
@@ -166,6 +168,38 @@ export default function WaterSystemPrototype() {
       loadMockData();
     }
   }, []); // eslint-disable-line
+
+  // Leak reports are admin-only server-side, so they can't ride along in
+  // loadFromAPI's Promise.all (that runs before any login and would 401).
+  // Fetch them once an admin session exists instead.
+  const loadLeakReports = useCallback(async () => {
+    if (!USE_API) return;
+    try {
+      const rows = await fetchLeakReports();
+      setLeakReports(
+        rows.map((r) => ({
+          id: r.id,
+          householdId: r.household_id,
+          name: r.name,
+          standpost: r.standpost,
+          location: r.location,
+          description: r.description,
+          severity: r.severity,
+          contactBack: !!r.contact_back,
+          status: r.status,
+          time: new Date(r.created_at.replace(" ", "T") + "Z").toLocaleString("en-PH", {
+            month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+          }),
+        }))
+      );
+    } catch {
+      // Not logged in as admin yet, or the request failed — leave the page empty.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (adminAuthenticated) loadLeakReports();
+  }, [adminAuthenticated, loadLeakReports]);
 
   // Normalize the address bar to the canonical /admin or /resident path
   // (e.g. a visit to "/" becomes "/admin") now that there's no in-app toggle.
@@ -504,6 +538,35 @@ export default function WaterSystemPrototype() {
     showToast(`Alert marked as ${nextStatus.toLowerCase()}`, "success");
   }
 
+  // ── Leak reports ─────────────────────────────────────────────
+  async function resolveLeakReport(id) {
+    const nextStatus = "Resolved";
+    if (USE_API) {
+      try {
+        await resolveLeakReportApi(id);
+      } catch (err) {
+        showToast("Could not resolve report: " + err.message, "warn");
+        return;
+      }
+    }
+    setLeakReports((prev) => prev.map((r) => (r.id === id ? { ...r, status: nextStatus } : r)));
+    showToast("Leak report marked as resolved", "success");
+  }
+
+  async function reopenLeakReport(id) {
+    const nextStatus = "Open";
+    if (USE_API) {
+      try {
+        await unresolveLeakReportApi(id);
+      } catch (err) {
+        showToast("Could not reopen report: " + err.message, "warn");
+        return;
+      }
+    }
+    setLeakReports((prev) => prev.map((r) => (r.id === id ? { ...r, status: nextStatus } : r)));
+    showToast("Leak report reopened", "success");
+  }
+
   // ── GCash payment ────────────────────────────────────────────
   function startGcashPayment(id) {
     setPaymentModal(id);
@@ -618,6 +681,9 @@ export default function WaterSystemPrototype() {
           setSelectedAlertId={setSelectedAlertId}
           resolveAlert={resolveAlert}
           unresolveAlert={unresolveAlert}
+          leakReports={leakReports}
+          resolveLeakReport={resolveLeakReport}
+          reopenLeakReport={reopenLeakReport}
           onResetResidentPassword={handleResetResidentPassword}
           onGenerateBills={handleGenerateBills}
           onAddHousehold={handleAddHousehold}

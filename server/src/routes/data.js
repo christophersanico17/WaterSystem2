@@ -463,4 +463,23 @@ router.get("/leak-reports", authMiddleware("admin", ["officer"]), (req, res) => 
   res.json(rows);
 });
 
+router.post("/leak-reports/:id/resolve", authMiddleware("admin", ["officer"]), (req, res) => {
+  const result = db
+    .prepare("UPDATE leak_reports SET status = 'Resolved' WHERE id = ?")
+    .run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: "Leak report not found." });
+  recordAudit(req, "leak_report.resolve", req.params.id, `Resolved leak report ${req.params.id}`);
+  res.json({ success: true });
+});
+
+// Undo an accidental resolve — moves a report back to Open.
+router.post("/leak-reports/:id/unresolve", authMiddleware("admin", ["officer"]), (req, res) => {
+  const result = db
+    .prepare("UPDATE leak_reports SET status = 'Open' WHERE id = ?")
+    .run(req.params.id);
+  if (result.changes === 0) return res.status(404).json({ error: "Leak report not found." });
+  recordAudit(req, "leak_report.unresolve", req.params.id, `Reopened leak report ${req.params.id}`);
+  res.json({ success: true });
+});
+
 module.exports = router;
