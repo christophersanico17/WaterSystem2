@@ -830,7 +830,7 @@ function ResidentForgotPasswordScreen({ households, initialHouseholdId, onDone, 
 // ─────────────────────────────────────────────────────────────
 // DASHBOARD
 // ─────────────────────────────────────────────────────────────
-export function ResidentDashboard({ me, setPage }) {
+export function ResidentDashboard({ me, setPage, alerts = [] }) {
   const maxConsumption = Math.max(...me.history.map((h) => h.curr - h.prev), 1);
 
   return (
@@ -925,6 +925,41 @@ export function ResidentDashboard({ me, setPage }) {
           <div className="text-[10px] text-slate-400 mt-0.5">Send alert</div>
         </button>
       </div>
+
+      {/* Recent flow alerts — real-time device detection (leak / high flow /
+          no sensor data), independent of the per-cycle usage banner above,
+          which only updates once a bill is generated. Hidden entirely when
+          there's nothing to show, so most residents never see an empty card. */}
+      {alerts.length > 0 && (
+        <div className="card-hover bg-white rounded-lg border border-slate-200 overflow-hidden mb-4">
+          <div className="px-4 py-2.5 text-[13px] font-semibold text-slate-700 border-b border-slate-100">
+            Recent flow alerts
+          </div>
+          <div className="divide-y divide-slate-100">
+            {alerts.slice(0, 5).map((a) => (
+              <div key={a.id} className="px-4 py-2.5 flex items-center justify-between text-[12px]">
+                <div>
+                  <span
+                    className={
+                      a.type === "Leak Detected" ? "text-rose-600 font-medium"
+                        : a.type === "High Flow" ? "text-amber-600 font-medium"
+                        : "text-slate-500 font-medium"
+                    }
+                  >
+                    {a.type}
+                  </span>
+                  <span className="text-slate-400 ml-2">{a.time}</span>
+                </div>
+                {a.status === "Unresolved" ? (
+                  <Badge tone="bad">Unresolved</Badge>
+                ) : (
+                  <Badge tone="good">Resolved</Badge>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Billing history table */}
       <div className="card-hover bg-white rounded-lg border border-slate-200 overflow-hidden">
@@ -1224,13 +1259,45 @@ export function ResidentBills({ me, setPage, startGcashPayment }) {
 // ─────────────────────────────────────────────────────────────
 // PAYMENT HISTORY  (was "Make Payment" — now shows history + pay option)
 // ─────────────────────────────────────────────────────────────
-export function ResidentPayments({ me, startGcashPayment }) {
+export function ResidentPayments({ me, startGcashPayment, syncPendingPayment }) {
+  const [checking, setChecking] = React.useState(false);
+
+  async function handleCheckStatus() {
+    setChecking(true);
+    try {
+      await syncPendingPayment?.(me.id);
+    } finally {
+      setChecking(false);
+    }
+  }
+
   return (
     <>
       <div className="mb-4">
         <h1 className="text-xl font-bold text-slate-800">Payment History</h1>
         <p className="text-xs text-slate-500 mt-0.5">All your payment records and pay your current bill</p>
       </div>
+
+      {/* Pending PayMongo checkout — shown once the resident has started (or
+          returned from) a GCash payment but PayMongo hasn't confirmed it yet. */}
+      {me.paymentStatus === "GCash Pending" && (
+        <div className="rounded-lg px-4 py-3 mb-4 flex items-center justify-between border bg-sky-50 border-sky-200">
+          <div>
+            <div className="text-[13px] font-semibold text-sky-800">Payment pending confirmation</div>
+            <div className="text-xs mt-0.5 text-sky-700">
+              We're waiting for PayMongo to confirm your GCash payment of{" "}
+              <span className="font-bold">{peso(me.totalDue)}</span>. This is usually instant.
+            </div>
+          </div>
+          <button
+            onClick={handleCheckStatus}
+            disabled={checking}
+            className="flex-shrink-0 ml-4 bg-sky-600 text-white text-[12px] font-semibold px-3 py-2 rounded-lg hover:bg-sky-700 transition disabled:opacity-60"
+          >
+            {checking ? "Checking…" : "Check payment status"}
+          </button>
+        </div>
+      )}
 
       {/* Pay now banner if unpaid — turns red once the bill is past due */}
       {me.paymentStatus === "Unpaid" && (
@@ -1275,7 +1342,7 @@ export function ResidentPayments({ me, startGcashPayment }) {
 
       {/* GCash payment section */}
       <div className="max-w-xl mb-5">
-        <GcashBillingSection me={me} onPay={startGcashPayment} />
+        <GcashBillingSection me={me} onPay={startGcashPayment} onCheckStatus={handleCheckStatus} checking={checking} />
       </div>
 
       {/* Payment history table */}

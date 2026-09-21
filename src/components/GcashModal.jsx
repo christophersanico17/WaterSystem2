@@ -34,15 +34,18 @@ export function GcashModal({ household, step, receipt, onConfirm, onClose }) {
                 <span className="font-bold text-lg">{peso(household.totalDue)}</span>
               </div>
               <button onClick={onConfirm} className="w-full bg-[#0072CE] hover:bg-[#005ea3] text-white font-semibold text-sm py-2.5 rounded-lg transition">
-                Confirm payment
+                Continue to PayMongo checkout
               </button>
+              <div className="text-[10px] text-slate-400 text-center mt-2">
+                You'll be redirected to PayMongo's secure page to complete your GCash payment.
+              </div>
             </>
           )}
 
           {step === "processing" && (
             <div className="py-8 flex flex-col items-center gap-3">
               <div className="w-8 h-8 border-[3px] border-[#0072CE] border-t-transparent rounded-full animate-spin" />
-              <div className="text-sm text-slate-500">Processing payment…</div>
+              <div className="text-sm text-slate-500">Redirecting to PayMongo…</div>
             </div>
           )}
 

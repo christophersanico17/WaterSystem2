@@ -9,6 +9,8 @@ import {
   updateAnnouncement,
   deleteAnnouncement,
   fetchAuditLog,
+  fetchAlertSettings,
+  updateAlertSettingsApi,
 } from "../api";
 
 const MONTHS = [
@@ -816,10 +818,150 @@ export function AlertsPage({ alerts, filter, setFilter, selectedAlertId, setSele
   );
 }
 
-export function HouseholdsPage({ households, showToast, onResetPassword, onAddHousehold }) {
+// Freshness-based status for a household's flow-sensor device. Devices are
+// expected to report every few seconds to a couple of minutes, so:
+//   < 90s   -> actively transmitting right now
+//   < 10min -> was transmitting recently (brief WiFi hiccup, still fine)
+//   older   -> treat as offline (dead battery, WiFi down, unplugged, etc.)
+function DeviceStatusBadge({ household }) {
+  if (!household.deviceProvisioned) {
+    return <span className="text-slate-400">Not connected</span>;
+  }
+  if (!household.deviceLastSeen) {
+    return <span className="text-amber-600 font-medium">Provisioned — awaiting first reading</span>;
+  }
+  const ageMs = Date.now() - new Date(household.deviceLastSeen.replace(" ", "T") + "Z").getTime();
+  if (ageMs < 90_000) return <span className="text-emerald-600 font-medium">● Online</span>;
+  if (ageMs < 10 * 60_000) return <span className="text-amber-600 font-medium">● Recently active</span>;
+  return <span className="text-red-600 font-medium">● Offline</span>;
+}
+
+// Provisioning + calibration UI for one household's Arduino/ESP flow-sensor
+// device. Lives inside the expanded household card in HouseholdsPage.
+function DeviceManager({ household, onProvisionDevice, onRevokeDevice, onSetDeviceCalibration, showToast }) {
+  const [revealedKey, setRevealedKey] = useState(null);
+  const [calibration, setCalibration] = useState(household.pulsesPerLiter);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setCalibration(household.pulsesPerLiter);
+  }, [household.pulsesPerLiter]);
+
+  async function handleProvision() {
+    setBusy(true);
+    try {
+      const key = await onProvisionDevice?.(household.id);
+      if (key) setRevealedKey(key);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRevoke() {
+    setBusy(true);
+    try {
+      await onRevokeDevice?.(household.id);
+      setRevealedKey(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSaveCalibration() {
+    const value = Number(calibration);
+    if (!Number.isFinite(value) || value <= 0) {
+      showToast?.("Calibration must be a positive number.", "warn");
+      return;
+    }
+    setBusy(true);
+    try {
+      await onSetDeviceCalibration?.(household.id, value);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function copyKey() {
+    if (!navigator.clipboard) {
+      showToast?.("Clipboard unavailable — copy the key manually.", "warn");
+      return;
+    }
+    navigator.clipboard.writeText(revealedKey).then(
+      () => showToast?.("Device key copied to clipboard.", "success"),
+      () => showToast?.("Could not copy — copy it manually.", "warn")
+    );
+  }
+
+  return (
+    <div className="pt-2 mt-1 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="font-semibold text-slate-700">IoT flow sensor</span>
+        <DeviceStatusBadge household={household} />
+      </div>
+
+      {revealedKey && (
+        <div className="bg-amber-50 border border-amber-200 rounded-md p-2 space-y-1">
+          <div className="text-amber-800 font-medium">Copy this key now — it won't be shown again.</div>
+          <div className="flex items-center gap-1.5">
+            <code className="flex-1 bg-white border border-amber-200 rounded px-1.5 py-1 text-[10px] break-all">
+              {revealedKey}
+            </code>
+            <Btn variant="outline" onClick={copyKey}>Copy</Btn>
+          </div>
+          <div className="text-[10px] text-amber-700">
+            Paste it into the firmware's <code>config.h</code> as <code>DEVICE_KEY</code>, then flash/reboot the device.
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <label className="text-slate-500">Calibration:</label>
+        <input
+          type="number"
+          min="1"
+          step="any"
+          value={calibration}
+          onChange={(e) => setCalibration(e.target.value)}
+          className="w-20 border border-slate-300 rounded px-1.5 py-1 text-[11px]"
+        />
+        <span className="text-slate-400">pulses/L</span>
+        <Btn variant="outline" onClick={handleSaveCalibration} disabled={busy}>Save</Btn>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Btn variant="outline" onClick={handleProvision} disabled={busy}>
+          {household.deviceProvisioned ? "Regenerate key" : "Generate device key"}
+        </Btn>
+        {household.deviceProvisioned && (
+          <Btn variant="ghostMuted" onClick={handleRevoke} disabled={busy}>Revoke</Btn>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function HouseholdsPage({
+  households,
+  showToast,
+  onResetPassword,
+  onAddHousehold,
+  onProvisionDevice,
+  onRevokeDevice,
+  onSetDeviceCalibration,
+}) {
   const [searchTerm, setSearchTerm] = React.useState("");
   const [expandedId, setExpandedId] = React.useState(null);
   const [showAddModal, setShowAddModal] = React.useState(false);
+
+  // DeviceStatusBadge reads Date.now() at render time, so without new data
+  // arriving (a fresh reading, a page action) it would never notice a device
+  // has gone quiet. This just forces a re-render periodically so "Online"
+  // ages into "Offline" on screen even when nothing else changes.
+  const [, forceTick] = React.useState(0);
+  React.useEffect(() => {
+    const id = setInterval(() => forceTick((n) => n + 1), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   const filtered = households.filter(
     (h) =>
@@ -930,6 +1072,14 @@ export function HouseholdsPage({ households, showToast, onResetPassword, onAddHo
                         </Btn>
                       </div>
                     )}
+
+                    <DeviceManager
+                      household={h}
+                      onProvisionDevice={onProvisionDevice}
+                      onRevokeDevice={onRevokeDevice}
+                      onSetDeviceCalibration={onSetDeviceCalibration}
+                      showToast={showToast}
+                    />
                   </div>
                 )}
               </div>
@@ -1266,7 +1416,6 @@ export function SettingsPage({ showToast }) {
   const [editing, setEditing] = React.useState(false);
   const [rate, setRate] = React.useState(RATE_PER_CM3);
   const [minBill, setMinBill] = React.useState(MIN_BILL);
-  const [threshold, setThreshold] = React.useState(50);
   const [gateway, setGateway] = React.useState("GCash");
 
   function handleSave() {
@@ -1279,95 +1428,202 @@ export function SettingsPage({ showToast }) {
   return (
     <>
       <SectionHeader title="Settings" sub="System configuration" />
-      <div className="card-hover bg-white rounded-lg border border-slate-200 p-5 max-w-md text-[12px] space-y-4">
-        <div className="flex items-center justify-between pb-1">
-          <span className="font-semibold text-slate-700 text-[13px]">Billing configuration</span>
+      <div className="grid gap-5 max-w-md">
+        <div className="card-hover bg-white rounded-lg border border-slate-200 p-5 text-[12px] space-y-4">
+          <div className="flex items-center justify-between pb-1">
+            <span className="font-semibold text-slate-700 text-[13px]">Billing configuration</span>
+            <button
+              onClick={() => setEditing(!editing)}
+              className="text-[12px] text-sky-600 hover:text-sky-800 font-medium"
+            >
+              {editing ? "Cancel" : "Edit"}
+            </button>
+          </div>
+
+          <div className="flex justify-between items-center">
+            <span className="text-slate-500">Rate per CM³</span>
+            {editing ? (
+              <input
+                type="number"
+                value={rate}
+                onChange={(e) => setRate(Number(e.target.value))}
+                className="w-24 border border-slate-300 rounded-md px-2 py-1 text-right text-[12px] focus:outline-none focus:border-sky-400"
+              />
+            ) : (
+              <span className="font-medium">{peso(rate)}</span>
+            )}
+          </div>
+
+          <div className="flex justify-between items-center">
+            <span className="text-slate-500">Minimum billing</span>
+            {editing ? (
+              <input
+                type="number"
+                value={minBill}
+                onChange={(e) => setMinBill(Number(e.target.value))}
+                className="w-24 border border-slate-300 rounded-md px-2 py-1 text-right text-[12px] focus:outline-none focus:border-sky-400"
+              />
+            ) : (
+              <span className="font-medium">{peso(minBill)}</span>
+            )}
+          </div>
+
+          <div className="flex justify-between items-center">
+            <span className="text-slate-500">Current billing period</span>
+            <span className="font-medium">{BILLING_PERIOD}</span>
+          </div>
+
+          <div className="flex justify-between items-center">
+            <span className="text-slate-500">Payment gateway</span>
+            {editing ? (
+              <select
+                value={gateway}
+                onChange={(e) => setGateway(e.target.value)}
+                className="border border-slate-300 rounded-md px-2 py-1 text-[12px] focus:outline-none focus:border-sky-400"
+              >
+                <option value="GCash">GCash</option>
+                <option value="Maya">Maya</option>
+                <option value="Cash only">Cash only</option>
+              </select>
+            ) : (
+              <span className="font-medium">{gateway}</span>
+            )}
+          </div>
+
+          {editing ? (
+            <div className="pt-2 border-t border-slate-100">
+              <Btn variant="primary" onClick={handleSave}>Save Changes</Btn>
+            </div>
+          ) : (
+            <div className="text-[10px] text-slate-400 pt-2 border-t border-slate-100">
+              Changes apply to this session only and are not persisted to a backend in this prototype.
+            </div>
+          )}
+        </div>
+
+        <AlertDetectionSettingsCard showToast={showToast} />
+      </div>
+    </>
+  );
+}
+
+// Real-time leak / abnormal-usage detection thresholds — unlike the billing
+// card above, these ARE persisted (server/src/utils/settings.js) and take
+// effect immediately: routes/devices.js's real-time check and routes/data.js's
+// per-cycle check both read them fresh on every run, no restart needed.
+const ALERT_SETTINGS_FIELDS = [
+  { key: "highFlowLpm", label: "High-flow burst", unit: "L/min", help: "A single reading at/above this = a wide-open tap or burst." },
+  { key: "leakFlowLpm", label: "Leak flow floor", unit: "L/min", help: "Low but non-zero flow — the signature of a persistent drip." },
+  { key: "leakSustainedMinutes", label: "Leak sustained for", unit: "min", help: "...continuously at/above the floor before it counts as a leak." },
+  { key: "deviceSilenceMinutes", label: "Device silence", unit: "min", help: "No readings from a connected device for this long -> \"No Sensor Data\"." },
+  { key: "highUsageRatio", label: "High usage ratio", unit: "× average", help: "A billing cycle at/above this multiple of a household's average." },
+  { key: "leakUsageRatio", label: "Leak usage ratio", unit: "× average", help: "...at/above this multiple instead -> Leak Detected." },
+];
+
+function AlertDetectionSettingsCard({ showToast }) {
+  const [editing, setEditing] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+  const [loaded, setLoaded] = React.useState(false);
+  const [values, setValues] = React.useState({});
+  const [draft, setDraft] = React.useState({});
+
+  React.useEffect(() => {
+    let cancelled = false;
+    fetchAlertSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        setValues(settings);
+        setDraft(settings);
+        setLoaded(true);
+      })
+      .catch((err) => {
+        if (!cancelled && typeof showToast === "function") {
+          showToast("Could not load alert thresholds: " + err.message, "warn");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []); // eslint-disable-line
+
+  function startEditing() {
+    setDraft(values);
+    setEditing(true);
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      const result = await updateAlertSettingsApi(draft);
+      setValues(result.settings);
+      setDraft(result.settings);
+      setEditing(false);
+      if (typeof showToast === "function") {
+        showToast("Detection thresholds updated — takes effect immediately.", "success");
+      }
+    } catch (err) {
+      if (typeof showToast === "function") {
+        showToast("Could not save thresholds: " + err.message, "warn");
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="card-hover bg-white rounded-lg border border-slate-200 p-5 text-[12px] space-y-4">
+      <div className="flex items-center justify-between pb-1">
+        <div>
+          <div className="font-semibold text-slate-700 text-[13px]">Leak & Abnormal Usage Detection</div>
+          <div className="text-[10px] text-slate-400 mt-0.5">Real-time thresholds — saved to the server, effective immediately.</div>
+        </div>
+        {loaded && (
           <button
-            onClick={() => setEditing(!editing)}
-            className="text-[12px] text-sky-600 hover:text-sky-800 font-medium"
+            onClick={() => (editing ? setEditing(false) : startEditing())}
+            className="text-[12px] text-sky-600 hover:text-sky-800 font-medium shrink-0"
           >
             {editing ? "Cancel" : "Edit"}
           </button>
-        </div>
-
-        <div className="flex justify-between items-center">
-          <span className="text-slate-500">Rate per CM³</span>
-          {editing ? (
-            <input
-              type="number"
-              value={rate}
-              onChange={(e) => setRate(Number(e.target.value))}
-              className="w-24 border border-slate-300 rounded-md px-2 py-1 text-right text-[12px] focus:outline-none focus:border-sky-400"
-            />
-          ) : (
-            <span className="font-medium">{peso(rate)}</span>
-          )}
-        </div>
-
-        <div className="flex justify-between items-center">
-          <span className="text-slate-500">Minimum billing</span>
-          {editing ? (
-            <input
-              type="number"
-              value={minBill}
-              onChange={(e) => setMinBill(Number(e.target.value))}
-              className="w-24 border border-slate-300 rounded-md px-2 py-1 text-right text-[12px] focus:outline-none focus:border-sky-400"
-            />
-          ) : (
-            <span className="font-medium">{peso(minBill)}</span>
-          )}
-        </div>
-
-        <div className="flex justify-between items-center">
-          <span className="text-slate-500">Current billing period</span>
-          <span className="font-medium">{BILLING_PERIOD}</span>
-        </div>
-
-        <div className="flex justify-between items-center">
-          <span className="text-slate-500">Alert threshold (flow)</span>
-          {editing ? (
-            <div className="flex items-center gap-1">
-              <input
-                type="number"
-                value={threshold}
-                onChange={(e) => setThreshold(Number(e.target.value))}
-                className="w-20 border border-slate-300 rounded-md px-2 py-1 text-right text-[12px] focus:outline-none focus:border-sky-400"
-              />
-              <span className="text-slate-400">L/min</span>
-            </div>
-          ) : (
-            <span className="font-medium">{threshold} L/min</span>
-          )}
-        </div>
-
-        <div className="flex justify-between items-center">
-          <span className="text-slate-500">Payment gateway</span>
-          {editing ? (
-            <select
-              value={gateway}
-              onChange={(e) => setGateway(e.target.value)}
-              className="border border-slate-300 rounded-md px-2 py-1 text-[12px] focus:outline-none focus:border-sky-400"
-            >
-              <option value="GCash">GCash</option>
-              <option value="Maya">Maya</option>
-              <option value="Cash only">Cash only</option>
-            </select>
-          ) : (
-            <span className="font-medium">{gateway}</span>
-          )}
-        </div>
-
-        {editing ? (
-          <div className="pt-2 border-t border-slate-100">
-            <Btn variant="primary" onClick={handleSave}>Save Changes</Btn>
-          </div>
-        ) : (
-          <div className="text-[10px] text-slate-400 pt-2 border-t border-slate-100">
-            Changes apply to this session only and are not persisted to a backend in this prototype.
-          </div>
         )}
       </div>
-    </>
+
+      {!loaded ? (
+        <div className="text-slate-400 py-2">Loading…</div>
+      ) : (
+        <>
+          {ALERT_SETTINGS_FIELDS.map((f) => (
+            <div key={f.key} className="flex justify-between items-center gap-3">
+              <div>
+                <div className="text-slate-500">{f.label}</div>
+                <div className="text-[10px] text-slate-400">{f.help}</div>
+              </div>
+              {editing ? (
+                <div className="flex items-center gap-1 shrink-0">
+                  <input
+                    type="number"
+                    step="any"
+                    value={draft[f.key]}
+                    onChange={(e) => setDraft((d) => ({ ...d, [f.key]: e.target.value }))}
+                    className="w-20 border border-slate-300 rounded-md px-2 py-1 text-right text-[12px] focus:outline-none focus:border-sky-400"
+                  />
+                  <span className="text-slate-400 whitespace-nowrap">{f.unit}</span>
+                </div>
+              ) : (
+                <span className="font-medium shrink-0">{values[f.key]} {f.unit}</span>
+              )}
+            </div>
+          ))}
+
+          {editing && (
+            <div className="pt-2 border-t border-slate-100">
+              <Btn variant="primary" onClick={handleSave} disabled={saving}>
+                {saving ? "Saving…" : "Save Changes"}
+              </Btn>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

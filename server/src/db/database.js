@@ -3,8 +3,10 @@ const bcrypt = require("bcryptjs");
 const path = require("path");
 const fs = require("fs");
 
-const DB_PATH = path.join(__dirname, "..", "..", "water_system.db");
-const isNewDb = !fs.existsSync(DB_PATH);
+// DB_PATH is overridable (e.g. ":memory:" or a temp file) so tests never
+// touch the real dev database — see server/test/*.
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, "..", "..", "water_system.db");
+const isNewDb = DB_PATH === ":memory:" || !fs.existsSync(DB_PATH);
 
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
@@ -101,9 +103,11 @@ function initSchema() {
     CREATE TABLE IF NOT EXISTS readings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       household_id TEXT NOT NULL REFERENCES households(id) ON DELETE CASCADE,
-      cm3 INTEGER NOT NULL,
+      cm3 REAL NOT NULL,
       flow_rate REAL NOT NULL,
       flow_type TEXT NOT NULL DEFAULT 'Normal', -- Normal | High flow
+      pulses INTEGER,                   -- raw pulse count reported by the device for this reading, if any
+      source TEXT NOT NULL DEFAULT 'device', -- device | manual | mock
       recorded_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -148,6 +152,18 @@ function initSchema() {
       created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- ─────────────────────────────────────────────────────────
+    -- Small key/value store for admin-configurable system settings
+    -- (currently: real-time leak / abnormal-usage detection thresholds).
+    -- Read fresh on every detection check, so a change here takes effect
+    -- immediately with no server restart.
+    -- ─────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_bills_household ON bills(household_id);
     CREATE INDEX IF NOT EXISTS idx_readings_household ON readings(household_id);
     CREATE INDEX IF NOT EXISTS idx_alerts_household ON alerts(household_id);
@@ -163,6 +179,31 @@ function initSchema() {
   if (!householdColumns.includes("email")) {
     db.exec("ALTER TABLE households ADD COLUMN email TEXT");
   }
+  // IoT flow-sensor device (Arduino/ESP + pulse sensor) fields. device_key is
+  // the secret the device authenticates with (X-Device-Key header) — never
+  // exposed over the public /api/residents endpoint, only to admins.
+  // pulses_per_liter is the calibration constant for the attached sensor
+  // (e.g. ~450 for a YF-S201 hall-effect flow sensor); admins can recalibrate
+  // it without reflashing the device, since volume math happens server-side.
+  if (!householdColumns.includes("device_key")) {
+    db.exec("ALTER TABLE households ADD COLUMN device_key TEXT");
+  }
+  if (!householdColumns.includes("pulses_per_liter")) {
+    db.exec("ALTER TABLE households ADD COLUMN pulses_per_liter REAL NOT NULL DEFAULT 450");
+  }
+  if (!householdColumns.includes("device_last_seen")) {
+    db.exec("ALTER TABLE households ADD COLUMN device_last_seen TEXT");
+  }
+
+  const readingColumns = db.prepare("PRAGMA table_info(readings)").all().map((c) => c.name);
+  if (!readingColumns.includes("pulses")) {
+    db.exec("ALTER TABLE readings ADD COLUMN pulses INTEGER");
+  }
+  if (!readingColumns.includes("source")) {
+    db.exec("ALTER TABLE readings ADD COLUMN source TEXT NOT NULL DEFAULT 'device'");
+  }
+
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_households_device_key ON households(device_key) WHERE device_key IS NOT NULL");
 
   const adminColumns = db.prepare("PRAGMA table_info(admin_accounts)").all().map((c) => c.name);
   if (!adminColumns.includes("reset_code_hash")) {

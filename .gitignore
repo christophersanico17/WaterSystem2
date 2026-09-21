@@ -11,3 +11,7 @@ dist
 *.db
 *.db-wal
 *.db-shm
+
+# ESP/Arduino firmware config — holds WiFi credentials and a device secret.
+# Copy config.example.h to config.h locally; never commit config.h itself.
+firmware/**/config.h

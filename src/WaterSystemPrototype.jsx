@@ -8,10 +8,11 @@ import {
   getToken, adminLogin, adminLogout,
   fetchResidents, fetchBills, fetchBillingPeriods, generateBills,
   fetchReadings, fetchLatestReading,
-  initiateGcash, recordCash, recordUnpaid, confirmGcash, fetchPayments,
+  initiateGcash, recordCash, recordUnpaid, confirmGcash, syncGcashByHousehold, fetchPayments,
   residentLogin, residentGoogleLogin, residentLogout,
   updateResidentProfile, resetResidentPassword, resolveAlertApi, unresolveAlertApi,
-  createHousehold, fetchAlerts,
+  createHousehold, fetchAlerts, fetchMyAlerts,
+  fetchDeviceStatus, provisionDevice, revokeDevice, setDeviceCalibration, liveEventsUrl,
 } from "./api";
 import { residentToHousehold } from "./databridge.js";
 import { jwtDecode } from "jwt-decode";
@@ -58,6 +59,7 @@ export default function WaterSystemPrototype() {
   // shared state — populated either from API or from mock data
   const [households, setHouseholds] = useState([]);
   const [alerts, setAlerts] = useState([]);
+  const [myAlerts, setMyAlerts] = useState([]);
   const [activeResidentId, setActiveResidentId] = useState(residentSession?.householdId || null);
 
   const [toast, setToast] = useState(null);
@@ -386,6 +388,144 @@ export default function WaterSystemPrototype() {
     }
   }
 
+  // ── IoT device (Arduino/ESP flow-sensor meter) management ─────
+  // Provisioning/calibration only — actual readings arrive out-of-band from
+  // the device itself via POST /api/devices/readings, picked up in near
+  // real time by the SSE subscription below rather than through these.
+  async function handleProvisionDevice(householdId) {
+    if (!USE_API) {
+      showToast("Device provisioning requires the backend to be running.", "warn");
+      return null;
+    }
+    try {
+      const result = await provisionDevice(householdId);
+      await loadFromAPI(true);
+      showToast(`Device key generated for ${householdId}. Copy it now — it won't be shown again.`, "success");
+      return result.deviceKey;
+    } catch (err) {
+      showToast("Could not provision device: " + err.message, "warn");
+      return null;
+    }
+  }
+
+  async function handleRevokeDevice(householdId) {
+    if (!USE_API) return;
+    try {
+      await revokeDevice(householdId);
+      await loadFromAPI(true);
+      showToast(`Device key revoked for ${householdId}. That device can no longer submit readings.`, "info");
+    } catch (err) {
+      showToast("Could not revoke device: " + err.message, "warn");
+    }
+  }
+
+  async function handleSetDeviceCalibration(householdId, pulsesPerLiter) {
+    if (!USE_API) return;
+    try {
+      await setDeviceCalibration(householdId, pulsesPerLiter);
+      await loadFromAPI(true);
+      showToast(`Calibration updated for ${householdId} (${pulsesPerLiter} pulses/L).`, "success");
+    } catch (err) {
+      showToast("Could not update calibration: " + err.message, "warn");
+    }
+  }
+
+  // ── Live sensor stream (Server-Sent Events) ────────────────────
+  // While the admin is logged in, keep an open connection to the backend so
+  // new device readings and alerts appear on the dashboard the moment
+  // they're reported — no polling, no manual refresh. Falls back to nothing
+  // special if it disconnects; the browser's EventSource retries on its own.
+  useEffect(() => {
+    if (!USE_API || !adminAuthenticated) return;
+    const url = liveEventsUrl();
+    if (!url) return;
+
+    const source = new EventSource(url);
+
+    source.addEventListener("reading", (e) => {
+      const r = JSON.parse(e.data);
+      setHouseholds((prev) =>
+        prev.map((h) =>
+          h.id === r.householdId
+            ? { ...h, currCm3: r.cm3, lastFlow: r.flowRate, flowType: r.flowType, lastReadingAt: r.recordedAt, deviceLastSeen: r.recordedAt }
+            : h
+        )
+      );
+    });
+
+    source.addEventListener("alert", (e) => {
+      const a = JSON.parse(e.data);
+      setAlerts((prev) => [
+        {
+          id: a.id,
+          householdId: a.household_id,
+          name: a.name,
+          standpost: a.standpost,
+          type: a.type,
+          flowRate: a.flow_rate,
+          threshold: a.threshold,
+          time: new Date(a.created_at.replace(" ", "T") + "Z").toLocaleString("en-PH", {
+            month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+          }),
+          status: a.status,
+        },
+        ...prev,
+      ].slice(0, 50));
+      showToast(`${a.type} — ${a.household_id} (${a.name})`, "warn");
+    });
+
+    // The backend auto-resolves some alerts on its own (e.g. "No Sensor
+    // Data" clears the moment a device reports again) — without this, the
+    // dashboard would keep showing that alert as open until the next manual
+    // refresh, even though it's already resolved server-side.
+    source.addEventListener("alert_resolved", (e) => {
+      const { id } = JSON.parse(e.data);
+      setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, status: "Resolved" } : a)));
+    });
+
+    // EventSource surfaces connection drops as a generic error with no
+    // detail; it retries automatically, so this is just for visibility —
+    // nothing to act on unless it keeps failing.
+    source.onerror = () => {
+      console.warn("Live sensor stream disconnected — retrying…");
+    };
+
+    return () => source.close();
+  }, [adminAuthenticated]); // eslint-disable-line
+
+  // ── Resident-facing alerts ──────────────────────────────────
+  // Same real-time leak/high-flow/no-sensor-data detection the admin
+  // dashboard shows, scoped to the logged-in resident's own household — so
+  // they see a live device-detected issue instead of only the per-cycle
+  // "High usage" banner (which only updates once a bill is generated).
+  useEffect(() => {
+    if (!USE_API || !residentAuthenticated) {
+      setMyAlerts([]);
+      return;
+    }
+    let cancelled = false;
+    fetchMyAlerts()
+      .then((rows) => {
+        if (cancelled) return;
+        setMyAlerts(
+          rows.map((a) => ({
+            id: a.id,
+            type: a.type,
+            flowRate: a.flow_rate,
+            threshold: a.threshold,
+            time: new Date(a.created_at.replace(" ", "T") + "Z").toLocaleString("en-PH", {
+              month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+            }),
+            status: a.status,
+          }))
+        );
+      })
+      .catch(() => {}); // non-critical — the dashboard still works without it
+    return () => {
+      cancelled = true;
+    };
+  }, [residentAuthenticated]); // eslint-disable-line
+
   async function handleGenerateBills(period) {
     if (!USE_API) {
       showToast("Bill generation requires the backend to be running.", "warn");
@@ -519,28 +659,14 @@ export default function WaterSystemPrototype() {
         if (!household?.bill_id) throw new Error("No bill found.");
         const result = await initiateGcash(household.bill_id);
         if (result.checkout_url) {
-          // Real PayMongo integration would redirect here; actual confirmation
-          // arrives via webhook, so just reset the modal.
-          window.open(result.checkout_url, "_blank");
-          setPaymentStep("confirm");
-          setPaymentModal(null);
-          showToast("Redirected to GCash payment page.", "info");
+          // Real PayMongo checkout — hand the whole tab off to PayMongo's
+          // hosted page. PayMongo redirects back to /resident?paidBill=<id>
+          // (see the effect below) once the resident finishes paying, at
+          // which point we independently verify with PayMongo before
+          // marking the bill Paid.
+          window.location.href = result.checkout_url;
         } else {
-          // This backend mocks GCash (no real payment gateway configured) —
-          // the bill is already marked "GCash Pending"; show a pending-
-          // confirmation receipt instead of a real payment redirect.
-          const receipt = {
-            ref: result.ref,
-            date: new Date().toLocaleString("en-PH", {
-              month: "short", day: "numeric", year: "numeric",
-              hour: "2-digit", minute: "2-digit",
-            }),
-            method: "GCash",
-          };
-          await loadFromAPI(true);
-          setPaymentStep("success");
-          setPaymentReceipt(receipt);
-          showToast("GCash payment initiated — pending admin confirmation.", "info");
+          throw new Error("PayMongo did not return a checkout link.");
         }
       } catch (err) {
         setPaymentStep("confirm");
@@ -549,7 +675,7 @@ export default function WaterSystemPrototype() {
       return;
     }
 
-    // Mock path: Set status to "GCash Pending" and wait for admin to confirm
+    // Mock path (USE_API off, no backend): simulate the pending state locally.
     setTimeout(() => {
       const receipt = {
         ref: `GC${Date.now().toString().slice(-8)}`,
@@ -559,7 +685,7 @@ export default function WaterSystemPrototype() {
         }),
         method: "GCash",
       };
-      
+
       setHouseholds((prev) =>
         prev.map((h) =>
           h.id === paymentModal
@@ -567,12 +693,55 @@ export default function WaterSystemPrototype() {
             : h
         )
       );
-      
+
       setPaymentStep("success");
       setPaymentReceipt(receipt);
       showToast("GCash payment initiated - Pending admin confirmation", "info");
     }, 1500);
   }
+
+  // Re-checks a pending PayMongo payment and marks it Paid if confirmed.
+  // Used both by the automatic post-checkout return (below) and by a manual
+  // "Check payment status" button, for cases like the resident closing the
+  // PayMongo tab before the redirect completes. Resolves the bill by
+  // household id server-side, so it works even before bill data is loaded.
+  async function syncPendingPayment(householdId, { silent = false } = {}) {
+    if (!USE_API || !householdId) return;
+    try {
+      const result = await syncGcashByHousehold(householdId, "resident");
+      if (result.paid) {
+        await loadFromAPI(true);
+        showToast("Payment confirmed by PayMongo — thank you!", "success");
+      } else if (!silent) {
+        showToast("PayMongo hasn't confirmed this payment yet. Try again in a moment.", "info");
+      }
+      return result;
+    } catch (err) {
+      if (!silent) showToast("Could not check payment status: " + err.message, "warn");
+    }
+  }
+
+  // Resident returns here after PayMongo checkout (success_url/cancel_url —
+  // see server/src/routes/data.js). Sync immediately so the UI reflects the
+  // real payment status without the resident needing to do anything.
+  useEffect(() => {
+    if (!USE_API || !residentAuthenticated) return;
+    const params = new URLSearchParams(window.location.search);
+    const paidHousehold = params.get("paidHousehold");
+    const cancelledHousehold = params.get("cancelledHousehold");
+    if (!paidHousehold && !cancelledHousehold) return;
+
+    // Strip the query string immediately so a refresh doesn't re-trigger this.
+    window.history.replaceState(null, "", window.location.pathname);
+
+    if (cancelledHousehold) {
+      showToast("Payment was cancelled.", "info");
+      return;
+    }
+    if (paidHousehold) {
+      syncPendingPayment(paidHousehold);
+    }
+  }, [residentAuthenticated]); // eslint-disable-line
 
   const unpaidCount = households.filter((h) => h.paymentStatus === "Unpaid" || h.paymentStatus === "GCash Pending").length;
   const billsGenerated = households.length;
@@ -621,6 +790,9 @@ export default function WaterSystemPrototype() {
           onResetResidentPassword={handleResetResidentPassword}
           onGenerateBills={handleGenerateBills}
           onAddHousehold={handleAddHousehold}
+          onProvisionDevice={handleProvisionDevice}
+          onRevokeDevice={handleRevokeDevice}
+          onSetDeviceCalibration={handleSetDeviceCalibration}
         />
       ) : (
         <ResidentView
@@ -629,6 +801,7 @@ export default function WaterSystemPrototype() {
           setActiveId={setActiveResidentId}
           page={residentPage}
           setPage={setResidentPage}
+          myAlerts={myAlerts}
           residentAuthenticated={residentAuthenticated}
           onResidentLogin={handleResidentLogin}
           onResidentGoogleLogin={handleResidentGoogleLogin}
@@ -636,6 +809,7 @@ export default function WaterSystemPrototype() {
           residentLoginHouseholdId={residentLoginHouseholdId}
           onResidentLoginHouseholdSelect={setResidentLoginHouseholdId}
           startGcashPayment={startGcashPayment}
+          syncPendingPayment={syncPendingPayment}
           onUpdateProfile={handleUpdateProfile}
           useApi={USE_API}
         />
