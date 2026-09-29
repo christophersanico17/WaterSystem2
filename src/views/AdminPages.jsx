@@ -11,6 +11,9 @@ import {
   fetchAuditLog,
   fetchAlertSettings,
   updateAlertSettingsApi,
+  fetchAdminAccounts,
+  createAdminAccount,
+  deleteAdminAccount,
 } from "../api";
 
 const MONTHS = [
@@ -290,9 +293,9 @@ export function ConsumptionPage({ households }) {
                     <td className="px-3 py-2 text-right text-slate-500">{h.rec.prev}</td>
                     <td className="px-3 py-2 text-right font-semibold text-slate-800">{h.rec.curr}</td>
                     <td className="px-3 py-2 text-right text-slate-600">{consumption}</td>
-                    <td className="px-3 py-2 text-right text-slate-500">{h.isLatest ? h.lastFlow : "—"}</td>
+                    <td className="px-3 py-2 text-right text-slate-500">{h.isLatest && h.deviceProvisioned && h.deviceLastSeen ? h.lastFlow : "—"}</td>
                     <td className="px-3 py-2 text-center">
-                      {h.isLatest ? (
+                      {h.isLatest && h.deviceProvisioned && h.deviceLastSeen ? (
                         h.flowType === "High flow" ? <Badge tone="bad">High flow</Badge> : <Badge tone="good">Normal</Badge>
                       ) : (
                         <span className="text-slate-400">—</span>
@@ -313,13 +316,17 @@ export function ConsumptionPage({ households }) {
   );
 }
 
-export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPayment, showToast, billsGenerated, unpaidCount, onGenerateBills, canGenerateBills = true }) {
+export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPayment, receiveCashPayment, showToast, billsGenerated, unpaidCount, onGenerateBills, canGenerateBills = true }) {
   const paidCount = households.length - unpaidCount;
   const gcashPendingCount = households.filter((h) => h.paymentStatus === "GCash Pending").length;
+  const cashPendingCount = households.filter((h) => h.paymentStatus === "Cash Pending").length;
   const overdueCount = households.filter(isOverdue).length;
   const [statusFilter, setStatusFilter] = React.useState("All");
   // { action: "paid" | "unpaid", id, name, amt } while a confirmation is pending.
   const [confirmPay, setConfirmPay] = React.useState(null);
+  // Method picked in the "Mark paid" modal — "Offline" (cash) or "GCash"
+  // (manually recording a GCash payment received outside the automatic flow).
+  const [payMethod, setPayMethod] = React.useState("Offline");
 
   function confirmPayment() {
     if (!confirmPay) return;
@@ -328,9 +335,10 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
     if (action === "unpaid") {
       markUnpaid(id);
     } else {
-      markPaid(id);
-      showToast(`${id} marked as paid`, "success");
+      markPaid(id, payMethod);
+      showToast(`${id} marked as paid (${payMethod === "GCash" ? "GCash" : "Cash"})`, "success");
     }
+    setPayMethod("Offline");
   }
   const monthOptions = [
     "All months",
@@ -396,6 +404,7 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
   const filteredBillingRecords = billingRecords.filter(({ household }) => {
     if (statusFilter === "All") return true;
     if (statusFilter === "GCash Pending") return household.paymentStatus === "GCash Pending";
+    if (statusFilter === "Cash Pending") return household.paymentStatus === "Cash Pending";
     if (statusFilter === "Overdue") return isOverdue(household);
     return statusFilter === "Paid" ? household.paymentStatus === "Paid" : household.paymentStatus === "Unpaid";
   });
@@ -462,7 +471,7 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
               record.curr,
               record.curr - record.prev,
               record.amt,
-              household.paymentStatus === "Paid" ? (household.paymentMethod === "GCash" ? "GCash" : "Cash") : household.paymentStatus === "GCash Pending" ? "GCash" : "Pending",
+              household.paymentStatus === "Paid" ? (household.paymentMethod === "GCash" ? "GCash" : "Cash") : household.paymentStatus === "GCash Pending" ? "GCash" : household.paymentStatus === "Cash Pending" ? "Cash" : "Pending",
               household.paymentStatus,
             ]);
             const csv = [header, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -485,12 +494,13 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
         <StatCard label="Bills generated" value={billsGenerated} />
         <StatCard label="Paid" value={paidCount} tone="good" />
         <StatCard label="GCash pending" value={gcashPendingCount} tone="warn" />
+        <StatCard label="Cash pending" value={cashPendingCount} tone="warn" />
         <StatCard label="Unpaid" value={unpaidCount} tone="bad" />
         <StatCard label="Overdue" value={overdueCount} tone="bad" />
       </div>
 
       <div className="flex flex-wrap gap-2 mb-4">
-        {['All', 'Paid', 'GCash Pending', 'Unpaid', 'Overdue'].map((status) => (
+        {['All', 'Paid', 'GCash Pending', 'Cash Pending', 'Unpaid', 'Overdue'].map((status) => (
           <button
             key={status}
             onClick={() => setStatusFilter(status)}
@@ -504,6 +514,8 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
                   ? 'bg-red-700 text-white border-red-700'
                   : status === 'GCash Pending'
                   ? 'bg-sky-600 text-white border-sky-600'
+                  : status === 'Cash Pending'
+                  ? 'bg-amber-600 text-white border-amber-600'
                   : 'bg-slate-900 text-white border-slate-900'
                 : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
             }`}
@@ -551,6 +563,8 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
                       ? household.paymentMethod === "GCash" ? "GCash" : "Cash"
                       : household.paymentStatus === "GCash Pending"
                       ? "GCash"
+                      : household.paymentStatus === "Cash Pending"
+                      ? "Cash"
                       : "Pending"}
                   </td>
                   <td className="px-3 py-1.5 text-center whitespace-nowrap">
@@ -562,6 +576,8 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
                       </span>
                     ) : household.paymentStatus === "GCash Pending" ? (
                       <Badge tone="info">GCash Pending</Badge>
+                    ) : household.paymentStatus === "Cash Pending" ? (
+                      <Badge tone="warn">Cash Pending</Badge>
                     ) : (
                       <Badge tone="bad">Unpaid</Badge>
                     )}
@@ -575,6 +591,15 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
                         }}
                       >
                         Confirm GCash
+                      </Btn>
+                    ) : household.paymentStatus === "Cash Pending" ? (
+                      <Btn
+                        variant="primary"
+                        onClick={() => {
+                          receiveCashPayment(household.id);
+                        }}
+                      >
+                        Confirm Cash
                       </Btn>
                     ) : household.paymentStatus === "Paid" ? (
                       <Btn variant="ghostMuted" onClick={() => setConfirmPay({ action: "unpaid", id: household.id, name: household.name, amt: record.amt })}>
@@ -623,11 +648,40 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
             </div>
             <div className="p-5 text-sm text-slate-600">
               <p className="mb-4">
-                {confirmPay.action === "unpaid" ? "Revert the recorded payment of " : "Record a cash payment of "}
+                {confirmPay.action === "unpaid" ? "Revert the recorded payment of " : "Record a payment of "}
                 <span className="font-semibold text-slate-800">{peso(confirmPay.amt)}</span> for{" "}
                 <span className="font-semibold text-slate-800">{confirmPay.id} — {confirmPay.name}</span>
                 {confirmPay.action === "unpaid" ? " back to unpaid?" : "?"}
               </p>
+              {confirmPay.action === "paid" && (
+                <div className="mb-4">
+                  <div className="text-[11px] font-semibold text-slate-500 mb-1.5">Payment method</div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPayMethod("Offline")}
+                      className={`flex-1 text-[12px] font-semibold py-2 rounded-lg border transition ${
+                        payMethod === "Offline"
+                          ? "bg-emerald-600 border-emerald-600 text-white"
+                          : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                      }`}
+                    >
+                      Cash
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPayMethod("GCash")}
+                      className={`flex-1 text-[12px] font-semibold py-2 rounded-lg border transition ${
+                        payMethod === "GCash"
+                          ? "bg-[#0072CE] border-[#0072CE] text-white"
+                          : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                      }`}
+                    >
+                      GCash
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="flex gap-2 justify-end">
                 <Btn onClick={() => setConfirmPay(null)}>Cancel</Btn>
                 <Btn variant="primary" onClick={confirmPayment}>
@@ -922,7 +976,7 @@ function DeviceManager({ household, onProvisionDevice, onRevokeDevice, onSetDevi
           step="any"
           value={calibration}
           onChange={(e) => setCalibration(e.target.value)}
-          className="w-20 border border-slate-300 rounded px-1.5 py-1 text-[11px]"
+          className="w-20 border border-slate-300 rounded px-1.5 py-1 text-[13px]"
         />
         <span className="text-slate-400">pulses/L</span>
         <Btn variant="outline" onClick={handleSaveCalibration} disabled={busy}>Save</Btn>
@@ -940,10 +994,54 @@ function DeviceManager({ household, onProvisionDevice, onRevokeDevice, onSetDevi
   );
 }
 
+// Shown on a household's card when the resident has filed a "forgot
+// password" request. No verification code involved — the admin types the
+// new password here and confirms it directly.
+function PasswordResetRequestBanner({ household, onConfirmPasswordReset, showToast }) {
+  const [newPassword, setNewPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function handleConfirm() {
+    if (newPassword.length < 8) {
+      showToast?.("New password must be at least 8 characters.", "warn");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await onConfirmPasswordReset?.(household.id, newPassword);
+      if (result && result.success) {
+        setNewPassword("");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 space-y-2">
+      <div className="text-amber-800 font-semibold">🔔 Password reset requested</div>
+      <div className="text-amber-700">Set a new password for this resident and confirm it — no code needed.</div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <input
+          type="text"
+          placeholder="New password"
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          className="flex-1 min-w-[140px] border border-amber-300 rounded-md px-2.5 py-1.5 text-[13px] bg-white focus:outline-none focus:border-amber-500"
+        />
+        <Btn variant="primary" onClick={handleConfirm} disabled={busy}>
+          {busy ? "Setting…" : "Set & Confirm"}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
 export function HouseholdsPage({
   households,
   showToast,
   onResetPassword,
+  onConfirmPasswordReset,
   onAddHousehold,
   onProvisionDevice,
   onRevokeDevice,
@@ -1000,27 +1098,35 @@ export function HouseholdsPage({
         />
       )}
 
-      <div className="grid grid-cols-2 gap-3">
-        {filtered.length > 0 ? (
-          filtered.map((h) => {
+      {filtered.length > 0 ? (
+        <div className="columns-1 sm:columns-2 gap-3">
+          {filtered.map((h) => {
             const isExpanded = expandedId === h.id;
+            const isDimmed = expandedId !== null && !isExpanded;
             return (
               <div
                 key={h.id}
-                className="card-hover bg-white rounded-lg border border-slate-200 p-3.5 cursor-pointer motion-safe:hover:-translate-y-0.5"
+                className={`card-hover bg-white rounded-lg border p-3.5 mb-3 break-inside-avoid-column cursor-pointer motion-safe:hover:-translate-y-0.5 transition-all duration-200 ${
+                  isExpanded
+                    ? "border-slate-800 ring-2 ring-slate-300 shadow-[0_0_16px_rgba(0,0,0,0.35)]"
+                    : isDimmed
+                    ? "border-slate-200 opacity-40 saturate-50"
+                    : "border-slate-200"
+                }`}
               >
                 <button
                   className="w-full text-left"
                   onClick={() => setExpandedId(isExpanded ? null : h.id)}
                 >
                   <div className="flex items-center justify-between mb-2">
-                    <div className="font-semibold text-slate-800 text-sm">{h.name}</div>
+                    <div className="font-semibold text-slate-800 text-base">{h.name}</div>
                     <div className="flex items-center gap-1.5">
+                      {h.passwordResetRequested && <Badge tone="warn">🔔 Password reset</Badge>}
                       {h.flowType === "High flow" && <Badge tone="bad">High Flow</Badge>}
                       <Badge tone="good">Active</Badge>
                     </div>
                   </div>
-                  <div className="text-[11px] text-slate-500 space-y-1">
+                  <div className="text-[13px] text-slate-500 space-y-1">
                     <div>Household ID: <span className="text-slate-700 font-medium">{h.id}</span></div>
                     <div>Standpost #: <span className="text-slate-700 font-medium">{h.standpost}</span></div>
                     <div>Meter #: <span className="text-slate-700 font-medium">{h.meter}</span></div>
@@ -1028,12 +1134,42 @@ export function HouseholdsPage({
                 </button>
 
                 {isExpanded && (
-                  <div className="mt-3 pt-3 border-t border-slate-100 text-[11px] text-slate-600 space-y-2">
+                  <div className="mt-3 pt-3 border-t border-slate-100 text-[13px] text-slate-600 space-y-2.5">
+                    {h.passwordResetRequested && (
+                      <PasswordResetRequestBanner
+                        household={h}
+                        onConfirmPasswordReset={onConfirmPasswordReset}
+                        showToast={showToast}
+                      />
+                    )}
+                    {(() => {
+                      const connected = h.deviceProvisioned && Boolean(h.deviceLastSeen);
+                      const flowing = connected && (h.lastFlow || 0) > 0;
+                      const isHighFlow = connected && h.flowType === "High flow";
+                      return (
+                        <div
+                          className={`flex items-center justify-between rounded-lg px-3 py-2 ${
+                            isHighFlow ? "bg-amber-50" : flowing ? "bg-sky-50" : "bg-slate-50"
+                          }`}
+                        >
+                          <span className="text-slate-500 font-medium">Live flow</span>
+                          {connected ? (
+                            <span className={`text-xl font-bold ${isHighFlow ? "text-amber-700" : flowing ? "text-sky-700" : "text-slate-600"}`}>
+                              {(h.lastFlow || 0).toFixed(1)} <span className="text-xs font-medium">L/min</span>
+                              {isHighFlow && <span className="ml-1.5 text-xs font-semibold text-amber-600">High flow</span>}
+                            </span>
+                          ) : (
+                            <span className="text-[13px] font-medium text-slate-400">
+                              {h.deviceProvisioned ? "Awaiting first reading" : "No sensor connected"}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                     <div className="grid grid-cols-2 gap-2">
                       <div>Current reading: <span className="font-semibold text-slate-800">{h.currCm3} CM³</span></div>
                       <div>Previous reading: <span className="font-semibold text-slate-800">{h.prevCm3} CM³</span></div>
                       <div>This cycle: <span className="font-semibold text-slate-800">{h.consumption} CM³</span></div>
-                      <div>Live flow: <span className="font-semibold text-slate-800">{h.lastFlow} L/min</span></div>
                       <div>Amount due: <span className="font-semibold text-slate-800">{peso(h.amount)}</span></div>
                       <div>Total due: <span className="font-semibold text-slate-800">{peso(h.totalDue)}</span></div>
                     </div>
@@ -1044,6 +1180,8 @@ export function HouseholdsPage({
                           <Badge tone="good">Paid</Badge>
                         ) : h.paymentStatus === "GCash Pending" ? (
                           <Badge tone="info">GCash Pending</Badge>
+                        ) : h.paymentStatus === "Cash Pending" ? (
+                          <Badge tone="warn">Cash Pending</Badge>
                         ) : (
                           <Badge tone="bad">Unpaid</Badge>
                         )}
@@ -1084,13 +1222,13 @@ export function HouseholdsPage({
                 )}
               </div>
             );
-          })
-        ) : (
-          <div className="col-span-2 bg-slate-50 border border-slate-200 rounded-lg p-6 text-center text-slate-500">
-            No households found matching "{searchTerm}".
-          </div>
-        )}
-      </div>
+          })}
+        </div>
+      ) : (
+        <div className="bg-slate-50 border border-slate-200 rounded-lg p-6 text-center text-slate-500">
+          No households found matching "{searchTerm}".
+        </div>
+      )}
     </>
   );
 }
@@ -1232,6 +1370,7 @@ function AddHouseholdModal({ onAdd, showToast, onClose }) {
               <label className="text-[11px] font-medium text-slate-600 block mb-1">Email</label>
               <input
                 type="email"
+                autoComplete="off"
                 value={form.email}
                 onChange={(e) => setField("email", e.target.value)}
                 className="w-full border border-slate-300 rounded-md px-2.5 py-1.5 text-[12px] focus:outline-none focus:border-sky-400"
@@ -1412,7 +1551,7 @@ export function RecordsPage({ households, showToast }) {
   );
 }
 
-export function SettingsPage({ showToast }) {
+export function SettingsPage({ showToast, adminEmail }) {
   const [editing, setEditing] = React.useState(false);
   const [rate, setRate] = React.useState(RATE_PER_CM3);
   const [minBill, setMinBill] = React.useState(MIN_BILL);
@@ -1502,6 +1641,7 @@ export function SettingsPage({ showToast }) {
         </div>
 
         <AlertDetectionSettingsCard showToast={showToast} />
+        <StaffAccountsCard showToast={showToast} adminEmail={adminEmail} />
       </div>
     </>
   );
@@ -1622,6 +1762,164 @@ function AlertDetectionSettingsCard({ showToast }) {
             </div>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+// Per-person staff logins — see server/src/routes/adminAccounts.js for why:
+// without this, the audit log can only ever say "admin@barangay.local" no
+// matter which real staff member clicked the button, since everyone would
+// otherwise be sharing one login.
+function StaffAccountsCard({ showToast, adminEmail }) {
+  const [accounts, setAccounts] = React.useState(null);
+  const [showCreate, setShowCreate] = React.useState(false);
+  const [firstName, setFirstName] = React.useState("");
+  const [lastName, setLastName] = React.useState("");
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [role, setRole] = React.useState("officer");
+  const [busy, setBusy] = React.useState(false);
+
+  function load() {
+    fetchAdminAccounts()
+      .then(setAccounts)
+      .catch((err) => {
+        if (typeof showToast === "function") showToast("Could not load staff accounts: " + err.message, "warn");
+      });
+  }
+
+  React.useEffect(load, []); // eslint-disable-line
+
+  async function handleCreate(e) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await createAdminAccount({ email, password, role, firstName, lastName });
+      showToast?.(`Account created for ${firstName} ${lastName}.`, "success");
+      setFirstName("");
+      setLastName("");
+      setEmail("");
+      setPassword("");
+      setRole("officer");
+      setShowCreate(false);
+      load();
+    } catch (err) {
+      showToast?.("Could not create account: " + err.message, "warn");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(accEmail) {
+    if (!window.confirm(`Remove the account for ${accEmail}? They will no longer be able to sign in.`)) return;
+    try {
+      await deleteAdminAccount(accEmail);
+      load();
+      showToast?.(`Account removed for ${accEmail}.`, "success");
+    } catch (err) {
+      showToast?.("Could not remove account: " + err.message, "warn");
+    }
+  }
+
+  return (
+    <div className="card-hover bg-white rounded-lg border border-slate-200 p-5 text-[12px] space-y-3">
+      <div className="flex items-center justify-between pb-1">
+        <div>
+          <div className="font-semibold text-slate-700 text-[13px]">Staff Accounts</div>
+          <div className="text-[10px] text-slate-400 mt-0.5">
+            One login per person — needed so the audit log can tell staff apart.
+          </div>
+        </div>
+        <button
+          onClick={() => setShowCreate((v) => !v)}
+          className="text-[12px] text-sky-600 hover:text-sky-800 font-medium shrink-0"
+        >
+          {showCreate ? "Cancel" : "+ Add account"}
+        </button>
+      </div>
+
+      {showCreate && (
+        <form onSubmit={handleCreate} className="space-y-2 pb-3 border-b border-slate-100">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              required
+              autoComplete="off"
+              placeholder="First name"
+              value={firstName}
+              onChange={(e) => setFirstName(e.target.value)}
+              className="w-1/2 border border-slate-300 rounded-md px-2 py-1.5 text-[12px] focus:outline-none focus:border-sky-400"
+            />
+            <input
+              type="text"
+              required
+              autoComplete="off"
+              placeholder="Last name"
+              value={lastName}
+              onChange={(e) => setLastName(e.target.value)}
+              className="w-1/2 border border-slate-300 rounded-md px-2 py-1.5 text-[12px] focus:outline-none focus:border-sky-400"
+            />
+          </div>
+          <input
+            type="email"
+            required
+            autoComplete="off"
+            placeholder="name@barangay.local"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-[12px] focus:outline-none focus:border-sky-400"
+          />
+          <input
+            type="password"
+            required
+            minLength={8}
+            autoComplete="new-password"
+            placeholder="Temporary password (min. 8 characters)"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-[12px] focus:outline-none focus:border-sky-400"
+          />
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            className="w-full border border-slate-300 rounded-md px-2 py-1.5 text-[12px] focus:outline-none focus:border-sky-400"
+          >
+            <option value="officer">Officer — full access</option>
+            <option value="collector">Collector — payments only</option>
+          </select>
+          <Btn variant="primary" type="submit" disabled={busy}>
+            {busy ? "Creating…" : "Create account"}
+          </Btn>
+        </form>
+      )}
+
+      {accounts === null ? (
+        <div className="text-slate-400 py-2">Loading…</div>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {accounts.map((acc) => (
+            <div key={acc.email} className="flex items-center justify-between py-2 gap-2">
+              <div className="min-w-0">
+                <div className="font-medium text-slate-700 truncate">
+                  {acc.name || acc.email}
+                  {adminEmail && acc.email.toLowerCase() === adminEmail.toLowerCase() && (
+                    <span className="text-slate-400 font-normal"> (you)</span>
+                  )}
+                </div>
+                <div className="text-[10px] text-slate-400 truncate">
+                  {acc.email} · <span className="capitalize">{acc.role}</span>
+                </div>
+              </div>
+              <button
+                onClick={() => handleDelete(acc.email)}
+                className="text-[11px] text-rose-500 hover:text-rose-700 font-medium shrink-0"
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -2047,7 +2345,7 @@ export function AuditLogPage({ showToast }) {
   const filtered = entries.filter((e) => {
     if (roleFilter !== "All" && (e.actorRole || "") !== roleFilter) return false;
     if (query) {
-      const hay = `${e.actorEmail || ""} ${e.details || ""} ${e.target || ""} ${auditActionMeta(e.action).label}`.toLowerCase();
+      const hay = `${e.actorEmail || ""} ${e.actorName || ""} ${e.details || ""} ${e.target || ""} ${auditActionMeta(e.action).label}`.toLowerCase();
       if (!hay.includes(query.toLowerCase())) return false;
     }
     return true;
@@ -2102,7 +2400,16 @@ export function AuditLogPage({ showToast }) {
                 return (
                   <tr key={e.id} className={i % 2 ? "bg-slate-50" : "bg-white"}>
                     <td className="px-3 py-1.5 text-slate-500 whitespace-nowrap">{formatAuditTime(e.createdAt)}</td>
-                    <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap">{e.actorEmail || "—"}</td>
+                    <td className="px-3 py-1.5 text-slate-700 whitespace-nowrap">
+                      {e.actorName ? (
+                        <>
+                          <div className="font-medium">{e.actorName}</div>
+                          <div className="text-[10px] text-slate-400">{e.actorEmail || "—"}</div>
+                        </>
+                      ) : (
+                        e.actorEmail || "—"
+                      )}
+                    </td>
                     <td className="px-3 py-1.5 whitespace-nowrap">
                       <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${e.actorRole === "officer" ? "bg-indigo-100 text-indigo-700" : "bg-teal-100 text-teal-700"}`}>
                         {e.actorRole === "officer" ? "Officer" : e.actorRole === "collector" ? "Collector" : e.actorRole || "—"}

@@ -1,19 +1,28 @@
 // Copy this file to config.h (same folder) and fill in your own values.
-// config.h holds your WiFi password and device secret, so it's git-ignored —
-// never commit it.
+// config.h holds your device secret, so it's git-ignored — never commit it.
 
 // ── WiFi ─────────────────────────────────────────────────────
-#define WIFI_SSID     "YourWiFiName"
-#define WIFI_PASSWORD "YourWiFiPassword"
+// No SSID/password here — the ESP connects to WiFi via WiFiManager (see
+// esp_water_meter.ino), which remembers whatever network you picked through
+// its setup portal and reconnects automatically on every boot.
+
+// Name of the temporary setup WiFi hotspot the ESP opens when it has no
+// saved network yet (or can't find it). Change this if you're provisioning
+// more than one device and want to tell them apart while pairing.
+#define SETUP_AP_NAME "BKWS-Setup"
 
 // ── Server ───────────────────────────────────────────────────
-// The machine running the backend (`npm start` in /server), reachable from
-// the ESP's network. On Windows, find your PC's LAN IP with `ipconfig`
-// (look for "IPv4 Address" on the adapter your WiFi router is on) — it's
-// usually NOT 127.0.0.1/localhost, since that only means "this device"
-// and the ESP is a separate physical device on the network.
-// Example: "http://192.168.1.50:4000"
-#define SERVER_URL "http://192.168.1.50:4000"
+// Deployed (cloud-hosted) server: set its public URL here. The meter then
+// reports to it from any WiFi network, over HTTPS. This is the normal setup
+// for meters installed in households.
+// #define SERVER_URL "https://your-app.up.railway.app"
+
+// Local development: leave SERVER_URL commented out and the ESP finds a
+// server running on the same WiFi network automatically, by broadcast (the
+// server answers from utils/discovery.js). Re-runs whenever WiFi reconnects
+// or reports keep failing, so it follows the PC across IP changes. Must
+// match DISCOVERY_PORT on the server (default 4001).
+#define DISCOVERY_PORT 4001
 
 // From the admin panel: Households → expand the household this meter
 // belongs to → "Generate device key". Shown once — copy it here right away.

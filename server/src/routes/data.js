@@ -1,6 +1,7 @@
 const express = require("express");
+const bcrypt = require("bcryptjs");
 const { db } = require("../db/database");
-const { authMiddleware } = require("../utils/auth");
+const { authMiddleware, optionalAuth } = require("../utils/auth");
 const { recordAudit } = require("../utils/audit");
 const paymongo = require("../utils/paymongo");
 const alerts = require("../utils/alerts");
@@ -13,36 +14,70 @@ const router = express.Router();
 // Residents / households
 // ───────────────────────────────────────────────────────────
 
-// GET /api/residents — list all households (admin) or pull a list for the login dropdown (public, minimal fields)
+// GET /api/residents — households, scoped to who's asking:
+//   admin    -> every household, full detail (dashboard needs the whole book)
+//   resident -> only their OWN household, full detail
+//   anonymous -> every household, but ONLY id/name/standpost/meter — just
+//                enough for the resident login screen's household picker,
+//                with no address/phone/email/device status attached. This
+//                endpoint used to return full detail for every household to
+//                anyone with no auth at all — that's the bug being fixed
+//                here: a household's private info must never be visible to
+//                a caller who isn't that household's own resident (or an
+//                admin).
 router.get("/residents", (req, res) => {
+  const user = optionalAuth(req);
   const rows = db.prepare("SELECT * FROM households ORDER BY id").all();
-  const residents = rows.map((h) => {
-    const account = db
-      .prepare("SELECT password_hash, google_email FROM resident_accounts WHERE household_id = ?")
-      .get(h.id);
-    return {
-      resident_id: h.id,
-      name: h.name,
-      standpost: h.standpost,
-      meter_no: h.meter,
-      address: h.address,
-      phone: h.phone,
-      email: h.email,
-      date_connected: h.date_connected,
-      has_password: Boolean(account && account.password_hash),
-      google_email: account ? account.google_email : null,
-      // Device status only — never the device_key itself, since this
-      // endpoint is public (used for the resident login dropdown too).
-      device_provisioned: Boolean(h.device_key),
-      device_last_seen: h.device_last_seen,
-      pulses_per_liter: h.pulses_per_liter,
-    };
-  });
-  res.json(residents);
+
+  if (user && user.role === "admin") {
+    return res.json(rows.map((h) => residentRow(h)));
+  }
+
+  if (user && user.role === "resident") {
+    const own = rows.filter((h) => h.id === user.householdId);
+    return res.json(own.map((h) => residentRow(h)));
+  }
+
+  // Anonymous: just enough for the resident login screen's household picker.
+  return res.json(rows.map((h) => ({
+    resident_id: h.id,
+    name: h.name,
+    standpost: h.standpost,
+    meter_no: h.meter,
+  })));
 });
 
-// GET /api/residents/:id — single household detail
-router.get("/residents/:id", (req, res) => {
+function residentRow(h) {
+  const account = db
+    .prepare("SELECT password_hash, google_email FROM resident_accounts WHERE household_id = ?")
+    .get(h.id);
+  return {
+    resident_id: h.id,
+    name: h.name,
+    standpost: h.standpost,
+    meter_no: h.meter,
+    address: h.address,
+    phone: h.phone,
+    email: h.email,
+    date_connected: h.date_connected,
+    has_password: Boolean(account && account.password_hash),
+    google_email: account ? account.google_email : null,
+    password_reset_requested: Boolean(
+      db.prepare("SELECT 1 FROM password_reset_requests WHERE household_id = ? AND status = 'Pending'").get(h.id)
+    ),
+    // Device status only — never the device_key itself.
+    device_provisioned: Boolean(h.device_key),
+    device_last_seen: h.device_last_seen,
+    pulses_per_liter: h.pulses_per_liter,
+  };
+}
+
+// GET /api/residents/:id — single household's full detail. Admin can fetch
+// any household; a resident may only fetch their own.
+router.get("/residents/:id", authMiddleware(), (req, res) => {
+  if (req.user.role !== "admin" && req.user.householdId !== req.params.id) {
+    return res.status(403).json({ error: "You can only view your own household." });
+  }
   const h = db.prepare("SELECT * FROM households WHERE id = ?").get(req.params.id);
   if (!h) return res.status(404).json({ error: "Household not found." });
   res.json(h);
@@ -85,7 +120,10 @@ router.post("/residents", authMiddleware("admin", ["officer"]), (req, res) => {
   res.json({ success: true, id });
 });
 
-// PATCH /api/residents/:id — a resident updates their own contact info
+// PATCH /api/residents/:id — a resident updates their own contact info and,
+// optionally, their password. Changing the password requires the current
+// one, same as the admin "My Account" flow — otherwise a hijacked, still
+// logged-in session could silently lock the real owner out.
 router.patch("/residents/:id", authMiddleware("resident"), (req, res) => {
   if (req.user.householdId !== req.params.id) {
     return res.status(403).json({ error: "You can only update your own household." });
@@ -93,7 +131,20 @@ router.patch("/residents/:id", authMiddleware("resident"), (req, res) => {
   const household = db.prepare("SELECT id FROM households WHERE id = ?").get(req.params.id);
   if (!household) return res.status(404).json({ error: "Household not found." });
 
-  const { name, address, phone, email } = req.body || {};
+  const { name, address, phone, email, currentPassword, newPassword } = req.body || {};
+
+  if (newPassword) {
+    const account = db.prepare("SELECT password_hash FROM resident_accounts WHERE household_id = ?").get(req.params.id);
+    if (!account || !account.password_hash || !currentPassword || !bcrypt.compareSync(currentPassword, account.password_hash)) {
+      return res.status(401).json({ error: "Current password is incorrect." });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: "New password must be at least 8 characters." });
+    }
+    const hash = bcrypt.hashSync(newPassword, 10);
+    db.prepare("UPDATE resident_accounts SET password_hash = ?, updated_at = datetime('now') WHERE household_id = ?").run(hash, req.params.id);
+  }
+
   db.prepare(
     `UPDATE households SET
        name = COALESCE(?, name),
@@ -106,11 +157,37 @@ router.patch("/residents/:id", authMiddleware("resident"), (req, res) => {
   res.json({ success: true });
 });
 
-// POST /api/residents/:id/reset-password  (admin only) — clears the resident's
-// password so they get the "create a new password" flow on next login.
+// POST /api/residents/:id/reset-password  (admin only)
+// Body: { newPassword? }
+// With newPassword: sets it directly and resolves any pending forgot-password
+// request for this household — the admin-confirmed flow that replaces email/SMS
+// verification codes entirely. Without it: clears the password so the resident
+// gets the "create a new password" flow on next login (unchanged behavior for
+// admin-initiated resets that aren't tied to a resident's request).
 router.post("/residents/:id/reset-password", authMiddleware("admin", ["officer"]), (req, res) => {
   const household = db.prepare("SELECT id FROM households WHERE id = ?").get(req.params.id);
   if (!household) return res.status(404).json({ error: "Household not found." });
+
+  const { newPassword } = req.body || {};
+
+  if (newPassword) {
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: "New password must be at least 8 characters." });
+    }
+    const hash = bcrypt.hashSync(newPassword, 10);
+    const account = db.prepare("SELECT household_id FROM resident_accounts WHERE household_id = ?").get(req.params.id);
+    if (account) {
+      db.prepare("UPDATE resident_accounts SET password_hash = ?, updated_at = datetime('now') WHERE household_id = ?").run(hash, req.params.id);
+    } else {
+      db.prepare("INSERT INTO resident_accounts (household_id, password_hash) VALUES (?, ?)").run(req.params.id, hash);
+    }
+    db.prepare(
+      "UPDATE password_reset_requests SET status = 'Resolved', resolved_at = datetime('now'), resolved_by = ? WHERE household_id = ? AND status = 'Pending'"
+    ).run(req.user.email || req.user.name || "admin", req.params.id);
+
+    recordAudit(req, "resident.password_reset_confirmed", req.params.id, `Set and confirmed a new password for ${req.params.id}`);
+    return res.json({ success: true });
+  }
 
   db.prepare(
     "UPDATE resident_accounts SET password_hash = NULL, updated_at = datetime('now') WHERE household_id = ?"
@@ -228,12 +305,19 @@ router.post("/bills/generate", authMiddleware("admin", ["officer"]), (req, res) 
   res.json({ success: true, period, created, skipped });
 });
 
-// GET /api/bills — all bills, optionally filtered by ?householdId=
-router.get("/bills", (req, res) => {
-  const { householdId } = req.query;
-  const rows = householdId
-    ? db.prepare("SELECT * FROM bills WHERE household_id = ? ORDER BY id").all(householdId)
-    : db.prepare("SELECT * FROM bills ORDER BY household_id, id").all();
+// GET /api/bills — admin: all bills, optionally filtered by ?householdId=.
+// resident: always forced to their OWN household regardless of any
+// ?householdId= they pass, since billing amounts/payment status/balances
+// are exactly the kind of thing one household must never see about another.
+router.get("/bills", authMiddleware(), (req, res) => {
+  if (req.user.role === "admin") {
+    const { householdId } = req.query;
+    const rows = householdId
+      ? db.prepare("SELECT * FROM bills WHERE household_id = ? ORDER BY id").all(householdId)
+      : db.prepare("SELECT * FROM bills ORDER BY household_id, id").all();
+    return res.json(rows);
+  }
+  const rows = db.prepare("SELECT * FROM bills WHERE household_id = ? ORDER BY id").all(req.user.householdId);
   res.json(rows);
 });
 
@@ -246,7 +330,9 @@ router.get("/bills/periods", (req, res) => {
   res.json(rows);
 });
 
-// POST /api/bills/:id/mark-paid  (admin only) — record an offline/cash payment
+// POST /api/bills/:id/mark-paid  (admin only) — record a payment the admin
+// witnessed directly (cash in hand, or a GCash payment confirmed by other
+// means than the automatic PayMongo flow). Body: { method: "Offline" | "GCash", amount }
 router.post("/bills/:id/mark-paid", authMiddleware("admin"), (req, res) => {
   const { method = "Offline" } = req.body || {};
   const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
@@ -413,16 +499,58 @@ router.post("/bills/:id/gcash/confirm", authMiddleware("admin"), (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/bills/:id/cash/initiate — resident declares intent to pay in
+// cash at the barangay office. Unlike GCash, there's no third party to
+// verify a cash handoff against, so this only ever marks the bill "Cash
+// Pending" — it can never flip to "Paid" by itself. An admin who physically
+// received the cash must confirm it via /cash/confirm below.
+router.post("/bills/:id/cash/initiate", authMiddleware("resident"), (req, res) => {
+  const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
+  if (!bill) return res.status(404).json({ error: "Bill not found." });
+  if (bill.household_id !== req.user.householdId) {
+    return res.status(403).json({ error: "You can only pay your own bill." });
+  }
+  if (bill.payment_status === "Paid") {
+    return res.status(400).json({ error: "This bill is already paid." });
+  }
+
+  db.prepare(
+    `UPDATE bills SET payment_status = 'Cash Pending', payment_method = 'Offline' WHERE id = ?`
+  ).run(req.params.id);
+
+  recordAudit(req, "bill.cash_initiate", bill.household_id, `${bill.household_id} declared intent to pay ${bill.period} bill in cash`);
+  res.json({ success: true });
+});
+
+// POST /api/bills/:id/cash/confirm  (admin only) — the admin who physically
+// received the cash confirms it, flipping "Cash Pending" to "Paid". This is
+// the only way a Cash Pending bill ever becomes Paid — never automatic.
+router.post("/bills/:id/cash/confirm", authMiddleware("admin"), (req, res) => {
+  const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
+  if (!bill) return res.status(404).json({ error: "Bill not found." });
+  if (bill.payment_status !== "Cash Pending") {
+    return res.status(400).json({ error: "This bill is not pending cash confirmation." });
+  }
+
+  db.prepare(
+    `UPDATE bills SET payment_status = 'Paid', payment_date = datetime('now') WHERE id = ?`
+  ).run(req.params.id);
+
+  recordAudit(req, "bill.cash_confirm", bill.household_id, `Confirmed cash payment for ${bill.household_id} (${bill.period})`);
+  res.json({ success: true });
+});
+
 // GET /api/payments — payment history, optionally filtered by ?householdId=
-router.get("/payments", (req, res) => {
-  const { householdId } = req.query;
-  const rows = householdId
+// Same admin-sees-all / resident-sees-own-only split as GET /bills above.
+router.get("/payments", authMiddleware(), (req, res) => {
+  const targetHouseholdId = req.user.role === "admin" ? req.query.householdId : req.user.householdId;
+  const rows = targetHouseholdId
     ? db
         .prepare(
           `SELECT id, household_id, period, amount, payment_method, payment_status, payment_date
            FROM bills WHERE household_id = ? AND payment_status != 'Unpaid' ORDER BY id`
         )
-        .all(householdId)
+        .all(targetHouseholdId)
     : db
         .prepare(
           `SELECT id, household_id, period, amount, payment_method, payment_status, payment_date
@@ -436,22 +564,30 @@ router.get("/payments", (req, res) => {
 // Readings (IoT sensor data)
 // ───────────────────────────────────────────────────────────
 
-// GET /api/readings?householdId=HH-001 — full reading history for a household
-router.get("/readings", (req, res) => {
+// GET /api/readings?householdId=HH-001 — full reading history for a
+// household. Admin may request any household; a resident only their own.
+router.get("/readings", authMiddleware(), (req, res) => {
   const { householdId } = req.query;
   if (!householdId) return res.status(400).json({ error: "householdId query param is required." });
+  if (req.user.role !== "admin" && req.user.householdId !== householdId) {
+    return res.status(403).json({ error: "You can only view your own readings." });
+  }
   const rows = db
     .prepare("SELECT * FROM readings WHERE household_id = ? ORDER BY recorded_at DESC")
     .all(householdId);
   res.json(rows);
 });
 
-// GET /api/readings/latest/:meterNo — most recent reading for a meter
-router.get("/readings/latest/:meterNo", (req, res) => {
+// GET /api/readings/latest/:meterNo — most recent reading for a meter.
+// Same ownership rule as above, resolved via the meter's owning household.
+router.get("/readings/latest/:meterNo", authMiddleware(), (req, res) => {
   const household = db
     .prepare("SELECT id FROM households WHERE meter = ?")
     .get(req.params.meterNo);
   if (!household) return res.status(404).json({ error: "Meter not found." });
+  if (req.user.role !== "admin" && req.user.householdId !== household.id) {
+    return res.status(403).json({ error: "You can only view your own readings." });
+  }
 
   const reading = db
     .prepare(
@@ -508,14 +644,28 @@ router.post("/readings", authMiddleware("admin", ["officer"]), (req, res) => {
 // Alerts
 // ───────────────────────────────────────────────────────────
 
-router.get("/alerts", (req, res) => {
+// Admin: every household's alerts. Resident: only their own (same data
+// /alerts/mine below already serves — this just keeps the shared frontend
+// loader that both portals call from ever seeing anyone else's).
+router.get("/alerts", authMiddleware(), (req, res) => {
+  if (req.user.role === "admin") {
+    const rows = db
+      .prepare(
+        `SELECT a.*, h.name, h.standpost
+         FROM alerts a JOIN households h ON h.id = a.household_id
+         ORDER BY a.created_at DESC`
+      )
+      .all();
+    return res.json(rows);
+  }
   const rows = db
     .prepare(
       `SELECT a.*, h.name, h.standpost
        FROM alerts a JOIN households h ON h.id = a.household_id
+       WHERE a.household_id = ?
        ORDER BY a.created_at DESC`
     )
-    .all();
+    .all(req.user.householdId);
   res.json(rows);
 });
 

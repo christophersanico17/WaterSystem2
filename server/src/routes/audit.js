@@ -15,6 +15,7 @@ router.get("/", authMiddleware("admin", ["officer"]), (req, res) => {
     rows.map((r) => ({
       id: r.id,
       actorEmail: r.actor_email,
+      actorName: r.actor_name,
       actorRole: r.actor_role,
       action: r.action,
       target: r.target,

@@ -57,6 +57,8 @@ function initSchema() {
       email TEXT PRIMARY KEY,
       password_hash TEXT NOT NULL,
       role TEXT NOT NULL DEFAULT 'officer', -- officer (full access) | collector (payments only)
+      first_name TEXT,                      -- staff member's real name, for the audit log
+      last_name TEXT,
       reset_code_hash TEXT,
       reset_code_expires TEXT,
       created_at TEXT DEFAULT (datetime('now'))
@@ -88,7 +90,7 @@ function initSchema() {
       amount REAL NOT NULL,
       prev_balance REAL NOT NULL DEFAULT 0,
       total_due REAL NOT NULL,
-      payment_status TEXT NOT NULL DEFAULT 'Unpaid', -- Unpaid | GCash Pending | Paid
+      payment_status TEXT NOT NULL DEFAULT 'Unpaid', -- Unpaid | GCash Pending | Cash Pending | Paid
       payment_method TEXT,              -- GCash | Offline
       payment_ref TEXT,
       payment_date TEXT,
@@ -139,12 +141,26 @@ function initSchema() {
     );
 
     -- ─────────────────────────────────────────────────────────
+    -- Password reset requests: a resident asks, an admin sets the new
+    -- password and confirms it — no email/SMS verification code involved.
+    -- ─────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS password_reset_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      household_id TEXT NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'Pending', -- Pending | Resolved
+      created_at TEXT DEFAULT (datetime('now')),
+      resolved_at TEXT,
+      resolved_by TEXT
+    );
+
+    -- ─────────────────────────────────────────────────────────
     -- Audit log: who did what (staff actions), for accountability
     -- across the officer / collector roles.
     -- ─────────────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS audit_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       actor_email TEXT,
+      actor_name TEXT,                  -- staff member's real name at the time of the action
       actor_role TEXT,                  -- officer | collector
       action TEXT NOT NULL,             -- e.g. "bill.mark_paid"
       target TEXT,                      -- e.g. "HH-004"
@@ -216,6 +232,23 @@ function initSchema() {
     // Existing admins predate roles — treat them all as full-access officers.
     db.exec("ALTER TABLE admin_accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'officer'");
   }
+  if (!adminColumns.includes("name")) {
+    // Legacy single-field name column, kept around only so old rows that
+    // haven't been split into first_name/last_name yet (see ensureSeedExtras)
+    // have somewhere to read from during migration.
+    db.exec("ALTER TABLE admin_accounts ADD COLUMN name TEXT");
+  }
+  if (!adminColumns.includes("first_name")) {
+    db.exec("ALTER TABLE admin_accounts ADD COLUMN first_name TEXT");
+  }
+  if (!adminColumns.includes("last_name")) {
+    db.exec("ALTER TABLE admin_accounts ADD COLUMN last_name TEXT");
+  }
+
+  const auditColumns = db.prepare("PRAGMA table_info(audit_log)").all().map((c) => c.name);
+  if (!auditColumns.includes("actor_name")) {
+    db.exec("ALTER TABLE audit_log ADD COLUMN actor_name TEXT");
+  }
 }
 
 // Seed data that must exist even on databases created before these features
@@ -227,8 +260,23 @@ function ensureSeedExtras() {
     .get("collector@barangay.local");
   if (!collectorExists) {
     db.prepare(
-      "INSERT INTO admin_accounts (email, password_hash, role) VALUES (?, ?, 'collector')"
-    ).run("collector@barangay.local", bcrypt.hashSync("collector123", 10));
+      "INSERT INTO admin_accounts (email, password_hash, role, first_name, last_name) VALUES (?, ?, 'collector', ?, ?)"
+    ).run("collector@barangay.local", bcrypt.hashSync("collector123", 10), "Collector", "Staff");
+  }
+
+  // Backfill first/last name for any account created before names existed at
+  // all, or before they were split into first_name/last_name, so nothing
+  // shows up blank in the audit log or UI. Best-effort split on the first
+  // space in the old single "name" field; a one-word name gets a "Staff"
+  // placeholder last name rather than an empty string, since login now
+  // requires both fields to be non-empty.
+  db.prepare("UPDATE admin_accounts SET name = 'Water Officer' WHERE email = 'admin@barangay.local' AND name IS NULL").run();
+  db.prepare("UPDATE admin_accounts SET name = 'Collector' WHERE email = 'collector@barangay.local' AND name IS NULL AND first_name IS NULL").run();
+  const unsplit = db.prepare("SELECT email, name FROM admin_accounts WHERE (first_name IS NULL OR first_name = '' OR last_name IS NULL OR last_name = '') AND name IS NOT NULL").all();
+  const splitUpdate = db.prepare("UPDATE admin_accounts SET first_name = ?, last_name = ? WHERE email = ?");
+  for (const row of unsplit) {
+    const parts = String(row.name).trim().split(/\s+/);
+    splitUpdate.run(parts[0] || row.name, parts.slice(1).join(" ") || "Staff", row.email);
   }
 
   // Default announcements, so existing installs don't show an empty list after

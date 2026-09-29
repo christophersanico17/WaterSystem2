@@ -10,7 +10,7 @@ export function Badge({ tone = "neutral", children }) {
   };
 
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${tones[tone]}`}>
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[12px] font-semibold ${tones[tone]}`}>
       {children}
     </span>
   );
@@ -65,7 +65,7 @@ export function Btn({ children, onClick, variant = "outline", tone = "default", 
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className={`text-xs font-semibold px-3 py-1.5 rounded-md transition ${baseClass} ${toneClass} ${
+      className={`text-[13px] font-semibold px-3 py-1.5 rounded-md transition ${baseClass} ${toneClass} ${
         disabled ? "opacity-60 cursor-not-allowed" : ""
       } ${className}`}
     >

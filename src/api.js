@@ -1,7 +1,10 @@
 // Thin fetch wrapper for the Barangay Kinamlutan Water System backend.
 // Every function here matches an import used in WaterSystemPrototype.jsx.
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:4000/api";
+// Dev: Vite on :5173 talks to the API on :4000. Production build: the
+// frontend is served by the API server itself (server/src/index.js), so the
+// API is same-origin at /api — works unchanged on whatever domain it's hosted.
+const API_BASE = import.meta.env.VITE_API_BASE || (import.meta.env.DEV ? "http://localhost:4000/api" : "/api");
 
 // Admin and resident sessions are independent — each gets its own storage
 // key so logging into one (e.g. in another tab) can't overwrite the other's
@@ -18,6 +21,19 @@ function setToken(role, token) {
 
 function clearToken(role) {
   localStorage.removeItem(TOKEN_KEYS[role]);
+}
+
+// Auto-detects which session (if any) is active in this browser tab, so the
+// fetchers shared between the admin dashboard and the resident portal (same
+// endpoint, different scope) attach whichever token is actually present
+// instead of always going out unauthenticated. Admin wins if somehow both
+// are set. Undefined (neither) means the request goes out with no auth
+// header at all — the server then returns only whatever's safe to show an
+// anonymous caller (e.g. the resident login dropdown's minimal fields).
+function activeAuthRole() {
+  if (getToken("admin")) return "admin";
+  if (getToken("resident")) return "resident";
+  return undefined;
 }
 
 async function request(path, { method = "GET", body, auth } = {}) {
@@ -48,6 +64,14 @@ async function request(path, { method = "GET", body, auth } = {}) {
   }
 
   if (!response.ok) {
+    // Only the auth *middleware's* own two messages mean the session itself
+    // is the problem — every other 401 (e.g. "Current password is incorrect.")
+    // is a legitimate, specific error from the route and must pass through
+    // unchanged, or real mistakes get misreported as expired sessions.
+    const authExpiredMessages = ["Missing authorization token.", "Invalid or expired token."];
+    if (response.status === 401 && auth && authExpiredMessages.includes(data && data.error)) {
+      throw new Error("Your session has expired. Please log out and log back in.");
+    }
     throw new Error((data && data.error) || `Request failed (${response.status}).`);
   }
 
@@ -56,16 +80,22 @@ async function request(path, { method = "GET", body, auth } = {}) {
 
 // ── Admin auth ────────────────────────────────────────────────
 
-export async function adminLogin(email, password) {
+export async function adminLogin(email, password, firstName, lastName) {
   const data = await request("/admin/login", {
     method: "POST",
-    body: { email, password },
+    body: { email, password, firstName, lastName },
   });
   if (!data.success) {
     throw new Error(data.message || "Login failed.");
   }
   setToken("admin", data.token);
-  return { email: data.email, role: data.role || "officer" };
+  return {
+    email: data.email,
+    role: data.role || "officer",
+    firstName: data.firstName || "",
+    lastName: data.lastName || "",
+    name: data.name || null,
+  };
 }
 
 export function adminLogout() {
@@ -86,16 +116,54 @@ export async function adminResetPassword({ email, code, newPassword }) {
   });
 }
 
+// ── Staff accounts (officer only) ───────────────────────────────
+// One login per staff member instead of a shared account, so the audit log
+// (which records actor_email on every action) can actually attribute who
+// did what — see server/src/routes/adminAccounts.js.
+
+export async function fetchAdminAccounts() {
+  return request("/admin/accounts", { auth: "admin" });
+}
+
+export async function createAdminAccount({ email, password, role, firstName, lastName }) {
+  return request("/admin/accounts", {
+    method: "POST",
+    body: { email, password, role, firstName, lastName },
+    auth: "admin",
+  });
+}
+
+export async function deleteAdminAccount(email) {
+  return request(`/admin/accounts/${encodeURIComponent(email)}`, {
+    method: "DELETE",
+    auth: "admin",
+  });
+}
+
+// Self-service edit of your OWN account — any field left undefined keeps
+// its current value server-side. Changing email or password requires
+// currentPassword. On success, swaps in the fresh token the server issues
+// (the old one's claims may now be stale) so the session stays valid.
+export async function updateAdminProfile({ firstName, lastName, email, currentPassword, newPassword }) {
+  const data = await request("/admin/me", {
+    method: "PATCH",
+    body: { firstName, lastName, email, currentPassword, newPassword },
+    auth: "admin",
+  });
+  if (data.token) setToken("admin", data.token);
+  return data;
+}
+
 // ── Resident auth ─────────────────────────────────────────────
 // These aren't in WaterSystemPrototype.jsx's import list yet, but are
 // needed to wire resident login (including Google) through the API.
 // Exported here so the prototype file can import them once USE_API
 // resident-login support is added.
 
-export async function residentLogin({ householdId, password, confirmPassword, email, username }) {
+export async function residentLogin({ householdId, password, confirmPassword, email, firstName, lastName }) {
   const data = await request("/resident/login", {
     method: "POST",
-    body: { householdId, password, confirmPassword, email, username },
+    body: { householdId, password, confirmPassword, email, firstName, lastName },
   });
   if (data.success && data.token) {
     setToken("resident", data.token);
@@ -125,13 +193,6 @@ export async function residentForgotPassword(householdId) {
   });
 }
 
-export async function residentResetPassword({ householdId, code, newPassword, confirmPassword }) {
-  return request("/resident/reset-password", {
-    method: "POST",
-    body: { householdId, code, newPassword, confirmPassword },
-  });
-}
-
 export async function unlinkGoogleAccount(householdId) {
   return request("/resident/google-unlink", {
     method: "POST",
@@ -147,7 +208,7 @@ export function residentLogout() {
 // ── Residents / households ──────────────────────────────────
 
 export async function fetchResidents() {
-  return request("/residents");
+  return request("/residents", { auth: activeAuthRole() });
 }
 
 export async function createHousehold(payload) {
@@ -173,10 +234,20 @@ export async function resetResidentPassword(householdId) {
   });
 }
 
+// Admin sets and confirms a new password for a resident directly — the
+// no-verification-code replacement for the old email/SMS reset-code flow.
+export async function confirmResidentPasswordReset(householdId, newPassword) {
+  return request(`/residents/${encodeURIComponent(householdId)}/reset-password`, {
+    method: "POST",
+    body: { newPassword },
+    auth: "admin",
+  });
+}
+
 // ── Bills ────────────────────────────────────────────────────
 
 export async function fetchBills() {
-  return request("/bills");
+  return request("/bills", { auth: activeAuthRole() });
 }
 
 export async function fetchBillingPeriods() {
@@ -191,10 +262,10 @@ export async function generateBills(period) {
   });
 }
 
-export async function recordCash(billId, amount) {
+export async function recordCash(billId, amount, method = "Offline") {
   return request(`/bills/${billId}/mark-paid`, {
     method: "POST",
-    body: { method: "Offline", amount },
+    body: { method, amount },
     auth: "admin",
   });
 }
@@ -215,6 +286,24 @@ export async function initiateGcash(billId) {
 
 export async function confirmGcash(billId) {
   return request(`/bills/${billId}/gcash/confirm`, {
+    method: "POST",
+    auth: "admin",
+  });
+}
+
+// Resident declares intent to pay in cash at the barangay office — marks
+// the bill "Cash Pending". Unlike GCash there's no third party to verify
+// the handoff, so this can never become "Paid" on its own; an admin must
+// confirm it via confirmCash() once they've actually received the cash.
+export async function initiateCash(billId) {
+  return request(`/bills/${billId}/cash/initiate`, {
+    method: "POST",
+    auth: "resident",
+  });
+}
+
+export async function confirmCash(billId) {
+  return request(`/bills/${billId}/cash/confirm`, {
     method: "POST",
     auth: "admin",
   });
@@ -242,23 +331,23 @@ export async function syncGcashByHousehold(householdId, auth) {
 
 export async function fetchPayments(householdId) {
   const qs = householdId ? `?householdId=${encodeURIComponent(householdId)}` : "";
-  return request(`/payments${qs}`);
+  return request(`/payments${qs}`, { auth: activeAuthRole() });
 }
 
 // ── Readings ─────────────────────────────────────────────────
 
 export async function fetchReadings(householdId) {
-  return request(`/readings?householdId=${encodeURIComponent(householdId)}`);
+  return request(`/readings?householdId=${encodeURIComponent(householdId)}`, { auth: activeAuthRole() });
 }
 
 export async function fetchLatestReading(meterNo) {
-  return request(`/readings/latest/${encodeURIComponent(meterNo)}`);
+  return request(`/readings/latest/${encodeURIComponent(meterNo)}`, { auth: activeAuthRole() });
 }
 
 // ── Alerts ───────────────────────────────────────────────────
 
 export async function fetchAlerts() {
-  return request("/alerts");
+  return request("/alerts", { auth: activeAuthRole() });
 }
 
 export async function resolveAlertApi(alertId) {

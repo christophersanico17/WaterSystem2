@@ -7,7 +7,7 @@ import { GcashBillingSection } from "../components/GcashBilling";
 import { ConsumptionStatusBanner } from "../components/ConsumptionStatusBanner";
 import { GoogleSignInButton } from "../components/GoogleSignInButton";
 import { peso, MIN_BILL, formatDueDate, dueDateForPeriod, getConsumptionStatus, isOverdue, daysOverdue } from "../data";
-import { submitLeakReport, residentForgotPassword, residentResetPassword, fetchAnnouncements } from "../api";
+import { submitLeakReport, residentForgotPassword, fetchAnnouncements } from "../api";
 
 // ─────────────────────────────────────────────────────────────
 // LOGIN — matches WaterSystemPrototype's handleResidentLogin contract:
@@ -40,7 +40,8 @@ export function LoginScreen({
   // of picking their name from a list — better privacy, matches the printed bill.
   const [controlNumber, setControlNumber] = useState(residentLoginHouseholdId || "");
   const [email, setEmail] = useState("");
-  const [username, setUsername] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -108,6 +109,10 @@ export function LoginScreen({
       return;
     }
     if (isNewPassword) {
+      if (!firstName.trim() || !lastName.trim()) {
+        setError("Please enter your first and last name.");
+        return;
+      }
       if (!isStrongPassword(password)) {
         setError(
           "Password must be at least 8 characters and include uppercase, lowercase, a number, and a symbol."
@@ -127,7 +132,8 @@ export function LoginScreen({
         password,
         confirmPassword,
         email: isNewPassword ? email : undefined,
-        username: isNewPassword ? username : undefined,
+        firstName: isNewPassword ? firstName : undefined,
+        lastName: isNewPassword ? lastName : undefined,
       });
       if (!result || !result.success) {
         // The backend always checks the real account state, regardless of
@@ -263,6 +269,7 @@ export function LoginScreen({
                     </div>
                     <input
                       type="email"
+                      autoComplete="off"
                       placeholder="you@example.com"
                       value={email}
                       onChange={(e) => { setEmail(e.target.value); setError(""); }}
@@ -271,22 +278,31 @@ export function LoginScreen({
                   </div>
                 </div>
 
-                <div className="mb-3">
-                  <label className="text-xs sm:text-[13px] font-semibold text-slate-600 block mb-1.5">
-                    Preferred Username
-                  </label>
-                  <div className="relative">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                      <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                      </svg>
-                    </div>
+                <div className="mb-3 grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="text-xs sm:text-[13px] font-semibold text-slate-600 block mb-1.5">
+                      First Name
+                    </label>
                     <input
                       type="text"
-                      placeholder="Choose a username"
-                      value={username}
-                      onChange={(e) => { setUsername(e.target.value); setError(""); }}
-                      className="w-full border border-slate-300 rounded-lg pl-9 pr-3 py-2.5 sm:py-3 text-base focus:outline-none focus:border-[#1e3a5f] focus:ring-1 focus:ring-[#1e3a5f] transition placeholder-slate-300"
+                      autoComplete="off"
+                      placeholder="Juan"
+                      value={firstName}
+                      onChange={(e) => { setFirstName(e.target.value); setError(""); }}
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2.5 sm:py-3 text-base focus:outline-none focus:border-[#1e3a5f] focus:ring-1 focus:ring-[#1e3a5f] transition placeholder-slate-300"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs sm:text-[13px] font-semibold text-slate-600 block mb-1.5">
+                      Last Name
+                    </label>
+                    <input
+                      type="text"
+                      autoComplete="off"
+                      placeholder="dela Cruz"
+                      value={lastName}
+                      onChange={(e) => { setLastName(e.target.value); setError(""); }}
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2.5 sm:py-3 text-base focus:outline-none focus:border-[#1e3a5f] focus:ring-1 focus:ring-[#1e3a5f] transition placeholder-slate-300"
                     />
                   </div>
                 </div>
@@ -306,6 +322,7 @@ export function LoginScreen({
                 </div>
                 <input
                   type="text"
+                  autoComplete="off"
                   placeholder="e.g., HH-001 (found on your water bill)"
                   value={controlNumber}
                   onChange={(e) => handleControlChange(e.target.value)}
@@ -346,6 +363,7 @@ export function LoginScreen({
                 </div>
                 <input
                   type={showPassword ? "text" : "password"}
+                  autoComplete={isNewPassword ? "new-password" : "current-password"}
                   placeholder={isNewPassword ? "Create a strong password" : "Your password"}
                   value={password}
                   onChange={(e) => {
@@ -441,6 +459,7 @@ export function LoginScreen({
                   </div>
                   <input
                     type={showConfirm ? "text" : "password"}
+                    autoComplete="new-password"
                     placeholder="Re-enter your password"
                     value={confirmPassword}
                     onChange={(e) => {
@@ -564,26 +583,19 @@ export function LoginScreen({
 }
 
 // ─────────────────────────────────────────────────────────────
-// FORGOT PASSWORD (resident) — two steps on one screen:
-//   1) request a reset code for the selected household
-//   2) enter the code + a new password + confirm password
-// No email/SMS service is configured, so the code is shown directly on
-// screen instead of being sent (mirrors the admin forgot-password flow).
+// FORGOT PASSWORD (resident) — files a request for an admin to handle.
+// No verification code: the resident just asks, and an admin sets and
+// confirms the new password directly from the Household Records page.
 // ─────────────────────────────────────────────────────────────
 function ResidentForgotPasswordScreen({ households, initialHouseholdId, onDone, onCancel }) {
   const [householdId, setHouseholdId] = useState(
     initialHouseholdId || (households[0] && households[0].id) || ""
   );
-  const [resetCode, setResetCode] = useState(null);
-  const [expiresInMinutes, setExpiresInMinutes] = useState(null);
-  const [codeInput, setCodeInput] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [requested, setRequested] = useState(false);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  async function handleRequestCode(e) {
+  async function handleRequest(e) {
     e.preventDefault();
     setError("");
     if (!householdId) {
@@ -594,49 +606,10 @@ function ResidentForgotPasswordScreen({ households, initialHouseholdId, onDone, 
     try {
       const result = await residentForgotPassword(householdId);
       if (!result.success) {
-        setError(result.message || "Could not send a reset code.");
+        setError(result.message || "Could not send your request.");
         return;
       }
-      setResetCode(result.resetCode);
-      setCodeInput(result.resetCode);
-      setExpiresInMinutes(result.expiresInMinutes);
-    } catch (err) {
-      setError(err.message || "Something went wrong. Please try again.");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function handleResetPassword(e) {
-    e.preventDefault();
-    setError("");
-    if (!codeInput || !newPassword) {
-      setError("Reset code and new password are required.");
-      return;
-    }
-    if (!isStrongPassword(newPassword)) {
-      setError(
-        "Password must be at least 8 characters and include uppercase, lowercase, a number, and a symbol."
-      );
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      setError("Passwords do not match.");
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const result = await residentResetPassword({
-        householdId,
-        code: codeInput,
-        newPassword,
-        confirmPassword,
-      });
-      if (!result.success) {
-        setError(result.message || "Could not reset your password.");
-        return;
-      }
-      onDone(householdId, "Password reset successfully. Sign in with your new password.");
+      setRequested(true);
     } catch (err) {
       setError(err.message || "Something went wrong. Please try again.");
     } finally {
@@ -667,9 +640,9 @@ function ResidentForgotPasswordScreen({ households, initialHouseholdId, onDone, 
               Reset Password
             </div>
             <div className="text-xs sm:text-sm text-slate-400 mb-5 text-center">
-              {resetCode
-                ? "Enter the reset code and choose a new password."
-                : "Select your household to get a reset code."}
+              {requested
+                ? "Your request is on its way."
+                : "Select your household — an admin will set your new password and confirm it. No code needed."}
             </div>
 
             {error && (
@@ -678,8 +651,8 @@ function ResidentForgotPasswordScreen({ households, initialHouseholdId, onDone, 
               </div>
             )}
 
-            {!resetCode ? (
-              <form onSubmit={handleRequestCode}>
+            {!requested ? (
+              <form onSubmit={handleRequest}>
                 <div className="mb-5">
                   <label className="text-xs sm:text-[13px] font-semibold text-slate-600 block mb-1.5">
                     Household / Standpost
@@ -720,91 +693,24 @@ function ResidentForgotPasswordScreen({ households, initialHouseholdId, onDone, 
                     submitting ? "bg-slate-400 cursor-not-allowed" : "bg-[#1e3a5f] hover:bg-[#16304f]"
                   }`}
                 >
-                  {submitting ? "Sending…" : "Send Reset Code"}
+                  {submitting ? "Sending…" : "Send Request to Admin"}
                 </button>
               </form>
             ) : (
-              <>
-                <div className="bg-sky-50 border border-sky-200 rounded-lg px-3 py-2.5 mb-4 text-xs sm:text-[13px] text-sky-800">
-                  <div className="font-semibold mb-1">
-                    No email service is configured, so here's your reset code:
-                  </div>
-                  <div className="text-2xl font-mono font-bold tracking-widest text-center py-1 text-slate-800">
-                    {resetCode}
-                  </div>
-                  <div className="text-xs sm:text-[13px] text-sky-600 text-center">
-                    Valid for {expiresInMinutes} minutes.
-                  </div>
+              <div className="bg-sky-50 border border-sky-200 rounded-lg px-4 py-5 text-center">
+                <div className="text-3xl mb-2">✅</div>
+                <div className="text-sm sm:text-base font-semibold text-slate-700 mb-1">Request sent</div>
+                <div className="text-xs sm:text-[13px] text-slate-500 mb-4">
+                  An admin will set your new password and confirm it. Check back and sign in once they've done that.
                 </div>
-
-                <form onSubmit={handleResetPassword}>
-                  <div className="mb-3">
-                    <label className="text-xs sm:text-[13px] font-semibold text-slate-600 block mb-1.5">
-                      Reset Code
-                    </label>
-                    <input
-                      type="text"
-                      value={codeInput}
-                      onChange={(e) => { setCodeInput(e.target.value); setError(""); }}
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2.5 sm:py-3 text-base font-mono tracking-widest focus:outline-none focus:border-[#1e3a5f] focus:ring-1 focus:ring-[#1e3a5f] transition"
-                    />
-                  </div>
-                  <div className="mb-3">
-                    <label className="text-xs sm:text-[13px] font-semibold text-slate-600 block mb-1.5">
-                      New Password
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showNewPassword ? "text" : "password"}
-                        value={newPassword}
-                        onChange={(e) => { setNewPassword(e.target.value); setError(""); }}
-                        className="w-full border border-slate-300 rounded-lg px-3 pr-10 py-2.5 sm:py-3 text-base focus:outline-none focus:border-[#1e3a5f] focus:ring-1 focus:ring-[#1e3a5f] transition placeholder-slate-300"
-                        placeholder="Create a strong password"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowNewPassword(!showNewPassword)}
-                        className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600"
-                      >
-                        {showNewPassword ? (
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                          </svg>
-                        ) : (
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                          </svg>
-                        )}
-                      </button>
-                    </div>
-                    <div className="text-[10px] sm:text-xs text-slate-400 mt-1 leading-snug">
-                      At least 8 characters, with uppercase, lowercase, a number, and a symbol.
-                    </div>
-                  </div>
-                  <div className="mb-5">
-                    <label className="text-xs sm:text-[13px] font-semibold text-slate-600 block mb-1.5">
-                      Confirm New Password
-                    </label>
-                    <input
-                      type="password"
-                      value={confirmPassword}
-                      onChange={(e) => { setConfirmPassword(e.target.value); setError(""); }}
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2.5 sm:py-3 text-base focus:outline-none focus:border-[#1e3a5f] focus:ring-1 focus:ring-[#1e3a5f] transition"
-                      placeholder="Re-enter your password"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={submitting}
-                    className={`w-full text-white text-sm sm:text-base font-semibold py-2.5 sm:py-3 rounded-lg transition active:scale-[0.98] ${
-                      submitting ? "bg-slate-400 cursor-not-allowed" : "bg-[#1e3a5f] hover:bg-[#16304f]"
-                    }`}
-                  >
-                    {submitting ? "Resetting…" : "Reset Password"}
-                  </button>
-                </form>
-              </>
+                <button
+                  type="button"
+                  onClick={() => onDone(householdId, "Password reset requested — an admin will set your new password.")}
+                  className="w-full text-white text-sm sm:text-base font-semibold py-2.5 sm:py-3 rounded-lg bg-[#1e3a5f] hover:bg-[#16304f] transition active:scale-[0.98]"
+                >
+                  Back to Sign In
+                </button>
+              </div>
             )}
 
             <div className="mt-4 text-center">
@@ -830,6 +736,63 @@ function ResidentForgotPasswordScreen({ households, initialHouseholdId, onDone, 
 // ─────────────────────────────────────────────────────────────
 // DASHBOARD
 // ─────────────────────────────────────────────────────────────
+// Freshness-based device status, same thresholds the admin panel uses
+// (AdminPages.jsx's DeviceStatusBadge) so residents and admins see the same
+// "is my meter actually reporting right now" read on the same data.
+function deviceStatus(me) {
+  if (!me.deviceProvisioned) return { label: "Not connected", tone: "text-slate-400" };
+  if (!me.deviceLastSeen) return { label: "Awaiting first reading", tone: "text-amber-600" };
+  const ageMs = Date.now() - new Date(me.deviceLastSeen.replace(" ", "T") + "Z").getTime();
+  if (ageMs < 90_000) return { label: "● Online", tone: "text-emerald-600" };
+  if (ageMs < 10 * 60_000) return { label: "● Recently active", tone: "text-amber-600" };
+  return { label: "● Offline", tone: "text-red-600" };
+}
+
+// Live flow-sensor reading — updates on its own (no refresh needed) since
+// `me` comes from shared state that an open SSE connection keeps current
+// the instant the household's ESP reports in (see WaterSystemPrototype.jsx).
+function LiveUsageCard({ me }) {
+  const status = deviceStatus(me);
+  const connected = me.deviceProvisioned && Boolean(me.deviceLastSeen);
+  const flowing = connected && (me.lastFlow || 0) > 0;
+  const isHighFlow = connected && me.flowType === "High flow";
+
+  return (
+    <div className="card-hover bg-white rounded-lg border border-slate-200 p-4 mb-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="font-semibold text-[13px] text-slate-700">Live water usage</div>
+        <span className={`text-[11px] font-medium ${status.tone}`}>{status.label}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className={`rounded-lg p-3 ${isHighFlow ? "bg-amber-50" : flowing ? "bg-sky-50" : "bg-slate-50"}`}>
+          <div className="text-[10px] text-slate-500 mb-0.5">Current flow rate</div>
+          {connected ? (
+            <div className={`text-xl font-bold ${isHighFlow ? "text-amber-700" : flowing ? "text-sky-700" : "text-slate-600"}`}>
+              {(me.lastFlow || 0).toFixed(1)} <span className="text-xs font-medium">L/min</span>
+            </div>
+          ) : (
+            <div className="text-xl font-bold text-slate-400">— <span className="text-xs font-medium">L/min</span></div>
+          )}
+          {isHighFlow && <div className="text-[10px] text-amber-600 font-medium mt-0.5">High flow detected</div>}
+        </div>
+        <div className="rounded-lg p-3 bg-slate-50">
+          <div className="text-[10px] text-slate-500 mb-0.5">Meter reading</div>
+          <div className="text-xl font-bold text-slate-700">
+            {me.currCm3} <span className="text-xs font-medium">CM³</span>
+          </div>
+        </div>
+      </div>
+      {!connected && (
+        <p className="text-[11px] text-slate-400 mt-2.5">
+          {me.deviceProvisioned
+            ? "Smart meter registered — waiting for its first reading."
+            : "No smart meter connected yet — your bill is based on manual readings until one's installed."}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function ResidentDashboard({ me, setPage, alerts = [] }) {
   const maxConsumption = Math.max(...me.history.map((h) => h.curr - h.prev), 1);
 
@@ -846,6 +809,8 @@ export function ResidentDashboard({ me, setPage, alerts = [] }) {
       </div>
 
       <ConsumptionStatusBanner me={me} />
+
+      <LiveUsageCard me={me} />
 
       {/* Quick stats */}
       <div className="grid grid-cols-2 gap-3 mb-5 sm:grid-cols-4">
@@ -1237,17 +1202,28 @@ export function ResidentBills({ me, setPage, startGcashPayment }) {
             <BillReplica me={me} period={selected} />
           </div>
 
-          {/* Pay button for unpaid current bill */}
+          {/* Pay buttons for unpaid current bill — GCash or Cash */}
           {selectedIdx === 0 && me.paymentStatus === "Unpaid" && (
-            <button
-              onClick={() => startGcashPayment(me.id)}
-              className="mt-3 w-full flex items-center justify-center gap-2 bg-[#0072CE] hover:bg-[#005ea3] text-white font-semibold text-sm py-2.5 rounded-lg transition"
-            >
-              <span className="bg-white text-[#0072CE] rounded px-1.5 py-0.5 text-xs font-extrabold">
-                G
-              </span>
-              Pay {peso(me.totalDue)} with GCash
-            </button>
+            <div className="mt-3 flex flex-col sm:flex-row gap-2">
+              <button
+                onClick={() => startGcashPayment(me.id)}
+                className="flex-1 flex items-center justify-center gap-2 bg-[#0072CE] hover:bg-[#005ea3] text-white font-semibold text-sm py-2.5 rounded-lg transition"
+              >
+                <span className="bg-white text-[#0072CE] rounded px-1.5 py-0.5 text-xs font-extrabold">
+                  G
+                </span>
+                Pay with GCash
+              </button>
+              <button
+                onClick={() => startGcashPayment(me.id, "cash")}
+                className="flex-1 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm py-2.5 rounded-lg transition"
+              >
+                <span className="bg-white text-emerald-600 rounded px-1.5 py-0.5 text-xs font-extrabold">
+                  ₱
+                </span>
+                Pay with Cash
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -1299,9 +1275,23 @@ export function ResidentPayments({ me, startGcashPayment, syncPendingPayment }) 
         </div>
       )}
 
+      {/* Cash Pending — resident declared intent to pay in person, waiting on
+          an admin to confirm they've actually received the cash. */}
+      {me.paymentStatus === "Cash Pending" && (
+        <div className="rounded-lg px-4 py-3 mb-4 flex items-center justify-between border bg-amber-50 border-amber-200">
+          <div>
+            <div className="text-[13px] font-semibold text-amber-800">Cash payment pending confirmation</div>
+            <div className="text-xs mt-0.5 text-amber-700">
+              Bring <span className="font-bold">{peso(me.totalDue)}</span> to the barangay office — an admin will
+              mark this Paid once they've received it.
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Pay now banner if unpaid — turns red once the bill is past due */}
       {me.paymentStatus === "Unpaid" && (
-        <div className={`rounded-lg px-4 py-3 mb-4 flex items-center justify-between border ${isOverdue(me) ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"}`}>
+        <div className={`rounded-lg px-4 py-3 mb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border ${isOverdue(me) ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"}`}>
           <div>
             <div className={`text-[13px] font-semibold ${isOverdue(me) ? "text-red-800" : "text-amber-800"}`}>
               {isOverdue(me)
@@ -1314,15 +1304,26 @@ export function ResidentPayments({ me, startGcashPayment, syncPendingPayment }) 
               {isOverdue(me) ? " that is now past its due date." : " due this period."}
             </div>
           </div>
-          <button
-            onClick={() => startGcashPayment(me.id)}
-            className="flex-shrink-0 ml-4 flex items-center gap-1.5 bg-[#0072CE] text-white text-[12px] font-semibold px-3 py-2 rounded-lg hover:bg-[#005ea3] transition"
-          >
-            <span className="bg-white text-[#0072CE] rounded px-1 py-0.5 text-[10px] font-extrabold">
-              G
-            </span>
-            Pay Now
-          </button>
+          <div className="flex-shrink-0 flex items-center gap-2">
+            <button
+              onClick={() => startGcashPayment(me.id)}
+              className="flex items-center gap-1.5 bg-[#0072CE] text-white text-[12px] font-semibold px-3 py-2 rounded-lg hover:bg-[#005ea3] transition"
+            >
+              <span className="bg-white text-[#0072CE] rounded px-1 py-0.5 text-[10px] font-extrabold">
+                G
+              </span>
+              Pay with GCash
+            </button>
+            <button
+              onClick={() => startGcashPayment(me.id, "cash")}
+              className="flex items-center gap-1.5 bg-emerald-600 text-white text-[12px] font-semibold px-3 py-2 rounded-lg hover:bg-emerald-700 transition"
+            >
+              <span className="bg-white text-emerald-600 rounded px-1 py-0.5 text-[10px] font-extrabold">
+                ₱
+              </span>
+              Pay with Cash
+            </button>
+          </div>
         </div>
       )}
 
@@ -1415,28 +1416,50 @@ export function ResidentProfile({ me, onUpdateProfile }) {
     phone: me.phone || "(09XX) XXX-XXXX",
     email: me.email || `${me.name.split(" ")[0].toLowerCase()}@gmail.com`,
   });
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   async function handleSave() {
     setError("");
+
+    if (newPassword) {
+      if (newPassword.length < 8) {
+        setError("New password must be at least 8 characters.");
+        return;
+      }
+      if (!currentPassword) {
+        setError("Enter your current password to set a new one.");
+        return;
+      }
+    }
+
     if (typeof onUpdateProfile !== "function") {
       setEditing(false);
       setSaved(true);
+      setCurrentPassword("");
+      setNewPassword("");
       setTimeout(() => setSaved(false), 3000);
       return;
     }
 
     setSaving(true);
     try {
-      const result = await onUpdateProfile(me.id, formData);
+      const result = await onUpdateProfile(me.id, {
+        ...formData,
+        currentPassword: newPassword ? currentPassword : undefined,
+        newPassword: newPassword || undefined,
+      });
       if (!result || !result.success) {
         setError((result && result.message) || "Could not save your changes. Please try again.");
         return;
       }
       setEditing(false);
       setSaved(true);
+      setCurrentPassword("");
+      setNewPassword("");
       setTimeout(() => setSaved(false), 3000);
     } finally {
       setSaving(false);
@@ -1461,7 +1484,12 @@ export function ResidentProfile({ me, onUpdateProfile }) {
         <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
           <div className="text-[13px] font-semibold text-slate-700">Account Details</div>
           <button
-            onClick={() => setEditing(!editing)}
+            onClick={() => {
+              setEditing(!editing);
+              setCurrentPassword("");
+              setNewPassword("");
+              setError("");
+            }}
             className="text-[12px] text-sky-600 hover:text-sky-800 font-medium"
           >
             {editing ? "Cancel" : "Edit"}
@@ -1492,6 +1520,7 @@ export function ResidentProfile({ me, onUpdateProfile }) {
                 {editing ? (
                   <input
                     type="text"
+                    autoComplete="off"
                     value={formData[field.key]}
                     onChange={(e) =>
                       setFormData((prev) => ({ ...prev, [field.key]: e.target.value }))
@@ -1504,6 +1533,34 @@ export function ResidentProfile({ me, onUpdateProfile }) {
               </div>
             ))}
           </div>
+
+          {editing && (
+            <div className="border-t border-slate-100 pt-4 grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-[11px] text-slate-500 block mb-1">New Password <span className="text-slate-400">(leave blank to keep current)</span></label>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="Min. 8 characters"
+                  className="w-full border border-slate-300 rounded-md px-2.5 py-1.5 text-[12px] focus:outline-none focus:border-sky-400"
+                />
+              </div>
+              {newPassword && (
+                <div>
+                  <label className="text-[11px] text-slate-500 block mb-1">Current Password</label>
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    className="w-full border border-slate-300 rounded-md px-2.5 py-1.5 text-[12px] focus:outline-none focus:border-sky-400"
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {editing && (
             <div className="pt-2 space-y-2">
@@ -1565,6 +1622,8 @@ export function ResidentConsumption({ me }) {
 
       <ConsumptionStatusBanner me={me} />
 
+      <LiveUsageCard me={me} />
+
       <div className="grid grid-cols-2 gap-3 mb-5 sm:grid-cols-4">
         <StatCard label="Previous reading" value={`${me.prevCm3} CM³`} />
         <StatCard label="Current reading" value={`${me.currCm3} CM³`} />
@@ -1573,7 +1632,7 @@ export function ResidentConsumption({ me }) {
           value={`${me.consumption} CM³`}
           tone={status.tone}
         />
-        <StatCard label="Last recorded flow" value={`${me.lastFlow} L/min`} />
+        <StatCard label="Last recorded flow" value={me.deviceProvisioned && me.deviceLastSeen ? `${me.lastFlow} L/min` : "No sensor"} />
       </div>
 
       {status.level === "high" && (

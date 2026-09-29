@@ -51,11 +51,14 @@ needed for a standard YF-S201-style sensor.
 2. Open `esp_water_meter/esp_water_meter.ino`.
 3. In the same folder, copy `config.example.h` to `config.h` and fill in:
    - Your WiFi SSID/password.
-   - `SERVER_URL` — the backend's address as reachable *from the ESP's
-     network* (not `localhost` — that means "this device" to the ESP
-     itself). On the machine running `npm start` in `/server`, find its LAN
-     IP with `ipconfig` (Windows) and use e.g. `http://192.168.1.50:4000`.
    - `DEVICE_KEY` — see **Provisioning** below.
+   - `SERVER_URL`: the cloud server's public URL
+     (`https://...up.railway.app`, see `../DEPLOY.md`). The meter then
+     reports over HTTPS from any WiFi network.
+   - For local testing, leave `SERVER_URL` commented out. The ESP then
+     finds a server running on the same WiFi automatically by broadcasting
+     on UDP port 4001 (`DISCOVERY_PORT`), and rediscovers it whenever WiFi
+     reconnects or reports keep failing.
 4. **Tools → Board**, select your exact board (e.g. "NodeMCU 1.0" or your
    ESP32 model), select the right **Port**, and **Upload**.
 5. Open the Serial Monitor (115200 baud) to watch it connect to WiFi and
@@ -115,9 +118,10 @@ noticeably more accurate billing than trusting the datasheet number.
 | Symptom | Likely cause |
 |---|---|
 | Serial Monitor stuck on "Connecting to WiFi…" | Wrong SSID/password in `config.h`, or a 5GHz-only network (ESP8266/ESP32 need 2.4GHz). |
-| `http.begin() failed` | Malformed `SERVER_URL` — must start with `http://`. |
+| `Looking for the server… no answer` | Server not running, on a different network than the ESP, or Windows Firewall is blocking inbound UDP 4001 — allow it (see Troubleshooting below). |
+| `http.begin() failed` | Malformed `SERVER_URL`. It must start with `https://` (cloud) or `http://` (local). |
 | HTTP 401 `Invalid device key` | Key was mistyped, or regenerated/revoked in the admin panel since flashing — re-provision and reflash. |
 | HTTP 400 `pulses must be...` / `intervalMs must be...` | Shouldn't happen with the stock firmware; indicates a modified sketch sending malformed JSON. |
-| Request times out / server unreachable | `SERVER_URL` isn't reachable from the ESP's WiFi — check both are on the same network/VLAN, and that the server's port (4000 by default) isn't blocked by a firewall. |
+| Request times out / server unreachable | Check both are on the same network/VLAN, and that Windows Firewall allows inbound TCP 4000 and UDP 4001 (admin PowerShell: `New-NetFirewallRule -DisplayName "WaterSystem" -Direction Inbound -Protocol TCP -LocalPort 4000 -Action Allow` and the same with `-Protocol UDP -LocalPort 4001`). |
 | Pulse count reads 0 even with water flowing | Check the signal wire is on an interrupt-capable pin, and flow direction matches the arrow on the sensor body. |
 | Admin dashboard shows "Offline" despite the device running | It hasn't reported in the last 10 minutes — check Serial Monitor for repeated report failures. |

@@ -49,4 +49,16 @@ function authMiddleware(requiredRole, allowedStaffRoles) {
   };
 }
 
-module.exports = { signToken, verifyToken, authMiddleware };
+// Decodes the Authorization header if present and valid, but never rejects
+// the request — for endpoints that behave differently for admin vs resident
+// vs anonymous callers rather than requiring any one of them. Returns the
+// JWT payload ({ role, email, ... } or { role, householdId }), or null if
+// there's no token, it's malformed, or it's expired/invalid.
+function optionalAuth(req) {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token) return null;
+  return verifyToken(token);
+}
+
+module.exports = { signToken, verifyToken, authMiddleware, optionalAuth };

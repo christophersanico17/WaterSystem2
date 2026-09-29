@@ -1,7 +1,7 @@
 const { db } = require("../db/database");
 
 const insertAudit = db.prepare(
-  "INSERT INTO audit_log (actor_email, actor_role, action, target, details) VALUES (?, ?, ?, ?, ?)"
+  "INSERT INTO audit_log (actor_email, actor_name, actor_role, action, target, details) VALUES (?, ?, ?, ?, ?, ?)"
 );
 
 // Record a staff action. Reads the actor from req.user (set by authMiddleware).
@@ -11,6 +11,7 @@ function recordAudit(req, action, target, details) {
     const actor = (req && req.user) || {};
     insertAudit.run(
       actor.email || null,
+      actor.name || null,
       actor.staffRole || null,
       action,
       target != null ? String(target) : null,

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "buildCommand": "npm run build && npm ci --prefix server --omit=dev"
+  },
+  "deploy": {
+    "startCommand": "npm run seed --prefix server && npm start --prefix server",
+    "healthcheckPath": "/api/health",
+    "restartPolicyType": "ON_FAILURE"
+  }
+}

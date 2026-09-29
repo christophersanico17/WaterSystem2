@@ -85,11 +85,14 @@ export function AdminView(props) {
     adminAuthenticated,
     onAdminLogin,
     onAdminLogout,
+    onUpdateAdminProfile,
     adminEmail,
+    adminName,
     adminRole = "officer",
     markPaid,
     markUnpaid,
     receiveGcashPayment,
+    receiveCashPayment,
     showToast,
     alertFilter,
     setAlertFilter,
@@ -98,6 +101,7 @@ export function AdminView(props) {
     resolveAlert,
     unresolveAlert,
     onResetResidentPassword,
+    onConfirmPasswordReset,
     onGenerateBills,
     onAddHousehold,
     onProvisionDevice,
@@ -111,9 +115,10 @@ export function AdminView(props) {
   const navItems = NAV_ITEMS.filter((item) => isOfficer || !item.officerOnly);
 
   const unresolvedCount = alerts.filter((a) => a.status === "Unresolved").length;
-  const gcashPendingCount = households.filter((h) => h.paymentStatus === "GCash Pending").length;
+  const pendingConfirmationCount = households.filter((h) => h.paymentStatus === "GCash Pending" || h.paymentStatus === "Cash Pending").length;
   const [collapsed, setCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [showMyAccount, setShowMyAccount] = useState(false);
 
   if (!adminAuthenticated || page === "login") {
     return <AdminLoginScreen onAdminLogin={onAdminLogin} />;
@@ -196,25 +201,29 @@ export function AdminView(props) {
           </button>
         </div>
 
-        {/* Admin info */}
-        <div className={`flex items-center px-3 py-3 border-b border-white/10 gap-2.5 ${collapsed ? "lg:gap-0 lg:justify-center" : ""}`}>
-          <div className="w-8 h-8 rounded-full bg-sky-500 flex items-center justify-center flex-shrink-0" title={collapsed ? adminEmail || "Admin" : undefined}>
+        {/* Admin info — click to edit your own name/email/password */}
+        <button
+          onClick={() => setShowMyAccount(true)}
+          title={collapsed ? `${adminName || adminEmail || "Admin"} — click to edit your account` : "Edit your account"}
+          className={`flex items-center px-3 py-3 border-b border-white/10 gap-2.5 w-full text-left hover:bg-white/5 transition ${collapsed ? "lg:gap-0 lg:justify-center" : ""}`}
+        >
+          <div className="w-8 h-8 rounded-full bg-sky-500 flex items-center justify-center flex-shrink-0">
             <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
           </div>
           <div className={`flex-1 min-w-0 ${collapsed ? "lg:hidden" : ""}`}>
-            <div className="text-[12px] font-semibold text-white truncate">{adminEmail || "Admin"}</div>
+            <div className="text-[12px] font-semibold text-white truncate">{adminName || adminEmail || "Admin"}</div>
             <div className="text-[10px] text-blue-300">{roleLabel}</div>
           </div>
-        </div>
+        </button>
 
         {/* Nav */}
         <nav className="flex-1 py-1.5">
           {navItems.map((item) => {
             const isActive = activePage === item.id;
             const badgeCount =
-              item.id === "alerts" ? unresolvedCount : item.id === "billing" ? gcashPendingCount : 0;
+              item.id === "alerts" ? unresolvedCount : item.id === "billing" ? pendingConfirmationCount : 0;
             const badgeColor = item.id === "alerts" ? "text-rose-400" : "text-sky-300";
             return (
               <button
@@ -277,7 +286,8 @@ export function AdminView(props) {
       <div className="flex-1 bg-slate-50 min-w-0">
         <div className="bg-white border-b border-slate-200 px-4 sm:px-6 py-2 flex items-center justify-between gap-2">
           <div className="text-[12px] text-slate-500 truncate">
-            Signed in as <span className="font-semibold text-slate-700">{adminEmail || "Admin"}</span>
+            Signed in as <span className="font-semibold text-slate-700">{adminName || adminEmail || "Admin"}</span>
+            {adminName && adminEmail && <span className="text-slate-400"> ({adminEmail})</span>}
           </div>
           <div className="hidden sm:block text-[11px] text-slate-400 flex-shrink-0">
             {new Date().toLocaleDateString("en-PH", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
@@ -299,6 +309,7 @@ export function AdminView(props) {
               markPaid={markPaid}
               markUnpaid={markUnpaid}
               receiveGcashPayment={receiveGcashPayment}
+              receiveCashPayment={receiveCashPayment}
               showToast={showToast}
               billsGenerated={billsGenerated}
               unpaidCount={unpaidCount}
@@ -322,6 +333,7 @@ export function AdminView(props) {
               households={households}
               showToast={showToast}
               onResetPassword={onResetResidentPassword}
+              onConfirmPasswordReset={onConfirmPasswordReset}
               onAddHousehold={onAddHousehold}
               onProvisionDevice={onProvisionDevice}
               onRevokeDevice={onRevokeDevice}
@@ -332,8 +344,159 @@ export function AdminView(props) {
           {activePage === "statements" && <BillStatementsPage households={households} />}
           {activePage === "announcements" && <AnnouncementsPage showToast={showToast} />}
           {activePage === "audit" && <AuditLogPage showToast={showToast} />}
-          {activePage === "settings" && <SettingsPage showToast={showToast} />}
+          {activePage === "settings" && <SettingsPage showToast={showToast} adminEmail={adminEmail} />}
         </div>
+      </div>
+
+      {showMyAccount && (
+        <MyAccountModal
+          adminEmail={adminEmail}
+          adminName={adminName}
+          onUpdateAdminProfile={onUpdateAdminProfile}
+          showToast={showToast}
+          onClose={() => setShowMyAccount(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// MY ACCOUNT — self-service edit of your own name/email/password.
+// Opened by clicking your own name/avatar in the sidebar. Always operates
+// on the signed-in account itself (server keys it off the JWT, not an id
+// passed here), so there's no way to use this to edit anyone else.
+// ─────────────────────────────────────────────────────────────
+function MyAccountModal({ adminEmail, adminName, onUpdateAdminProfile, showToast, onClose }) {
+  const nameParts = (adminName || "").trim().split(/\s+/);
+  const [first, setFirst] = useState(nameParts[0] || "");
+  const [last, setLast] = useState(nameParts.slice(1).join(" ") || "");
+  const [email, setEmail] = useState(adminEmail || "");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const emailChanged = email.trim().toLowerCase() !== (adminEmail || "").toLowerCase();
+  const needsCurrentPassword = emailChanged || newPassword.length > 0;
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError("");
+
+    if (!first.trim() || !last.trim() || !email.trim()) {
+      setError("First name, last name, and email are all required.");
+      return;
+    }
+    if (needsCurrentPassword && !currentPassword) {
+      setError("Enter your current password to change your email or password.");
+      return;
+    }
+    if (newPassword && newPassword.length < 8) {
+      setError("New password must be at least 8 characters.");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const result = await onUpdateAdminProfile({
+        firstName: first.trim(),
+        lastName: last.trim(),
+        email: email.trim(),
+        currentPassword: needsCurrentPassword ? currentPassword : undefined,
+        newPassword: newPassword || undefined,
+      });
+      if (!result || !result.success) {
+        setError((result && result.message) || "Could not update your account.");
+        return;
+      }
+      showToast?.("Your account was updated.", "success");
+      onClose();
+    } catch (err) {
+      setError(err.message || "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="bg-[#1e3a5f] text-white px-5 py-4 flex items-center justify-between">
+          <div className="font-bold">My Account</div>
+          <button onClick={onClose} className="text-white/80 hover:text-white text-lg leading-none">×</button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-5 space-y-3 text-[12px]">
+          {error && (
+            <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-rose-700">{error}</div>
+          )}
+
+          <div className="flex gap-2">
+            <div className="flex-1">
+              <label className="block text-slate-500 mb-1">First name</label>
+              <input
+                type="text"
+                autoComplete="off"
+                value={first}
+                onChange={(e) => setFirst(e.target.value)}
+                className="w-full border border-slate-300 rounded-md px-2 py-1.5 focus:outline-none focus:border-sky-400"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="block text-slate-500 mb-1">Last name</label>
+              <input
+                type="text"
+                autoComplete="off"
+                value={last}
+                onChange={(e) => setLast(e.target.value)}
+                className="w-full border border-slate-300 rounded-md px-2 py-1.5 focus:outline-none focus:border-sky-400"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-slate-500 mb-1">Email (username)</label>
+            <input
+              type="email"
+              autoComplete="off"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full border border-slate-300 rounded-md px-2 py-1.5 focus:outline-none focus:border-sky-400"
+            />
+          </div>
+
+          <div>
+            <label className="block text-slate-500 mb-1">New password <span className="text-slate-400">(leave blank to keep current)</span></label>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="Min. 8 characters"
+              className="w-full border border-slate-300 rounded-md px-2 py-1.5 focus:outline-none focus:border-sky-400"
+            />
+          </div>
+
+          {needsCurrentPassword && (
+            <div>
+              <label className="block text-slate-500 mb-1">Current password <span className="text-slate-400">(required to change email/password)</span></label>
+              <input
+                type="password"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                className="w-full border border-slate-300 rounded-md px-2 py-1.5 focus:outline-none focus:border-sky-400"
+              />
+            </div>
+          )}
+
+          <div className="flex gap-2 justify-end pt-2">
+            <Btn onClick={onClose} type="button">Cancel</Btn>
+            <Btn variant="primary" type="submit" disabled={busy}>
+              {busy ? "Saving…" : "Save changes"}
+            </Btn>
+          </div>
+        </form>
       </div>
     </div>
   );
@@ -347,6 +510,8 @@ export function AdminView(props) {
 // ─────────────────────────────────────────────────────────────
 function AdminLoginScreen({ onAdminLogin }) {
   const [mode, setMode] = useState("login"); // 'login' | 'forgot'
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -358,14 +523,14 @@ function AdminLoginScreen({ onAdminLogin }) {
     e.preventDefault();
     setError("");
 
-    if (!email || !password) {
-      setError("Email and password are required.");
+    if (!firstName || !lastName || !email || !password) {
+      setError("First name, last name, email, and password are all required.");
       return;
     }
 
     setSubmitting(true);
     try {
-      const result = await onAdminLogin({ email, password });
+      const result = await onAdminLogin({ email, password, firstName, lastName });
       if (!result || !result.success) {
         setError((result && result.message) || "Login failed. Please try again.");
       }
@@ -436,6 +601,39 @@ function AdminLoginScreen({ onAdminLogin }) {
             )}
 
             <form onSubmit={handleSubmit}>
+              {/* First / last name */}
+              <div className="mb-3">
+                <div className="flex gap-2">
+                  <div className="flex-1">
+                    <label className="text-xs sm:text-[13px] font-semibold text-slate-600 block mb-1.5">
+                      First Name
+                    </label>
+                    <input
+                      type="text"
+                      value={firstName}
+                      onChange={(e) => { setFirstName(e.target.value); setError(""); }}
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2.5 sm:py-3 text-base focus:outline-none focus:border-[#1e3a5f] focus:ring-1 focus:ring-[#1e3a5f] transition placeholder-slate-300"
+                      placeholder="Maria"
+                      autoComplete="given-name"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-xs sm:text-[13px] font-semibold text-slate-600 block mb-1.5">
+                      Last Name
+                    </label>
+                    <input
+                      type="text"
+                      value={lastName}
+                      onChange={(e) => { setLastName(e.target.value); setError(""); }}
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2.5 sm:py-3 text-base focus:outline-none focus:border-[#1e3a5f] focus:ring-1 focus:ring-[#1e3a5f] transition placeholder-slate-300"
+                      placeholder="Santos"
+                      autoComplete="family-name"
+                    />
+                  </div>
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">Must match the name on file for this account — used for the audit log.</div>
+              </div>
+
               {/* Email */}
               <div className="mb-3">
                 <label className="text-xs sm:text-[13px] font-semibold text-slate-600 block mb-1.5">
@@ -696,6 +894,7 @@ function ForgotPasswordScreen({ initialEmail, onDone, onCancel }) {
                     </label>
                     <input
                       type="text"
+                      autoComplete="one-time-code"
                       value={codeInput}
                       onChange={(e) => { setCodeInput(e.target.value); setError(""); }}
                       className="w-full border border-slate-300 rounded-lg px-3 py-2.5 sm:py-3 text-base font-mono tracking-widest focus:outline-none focus:border-[#1e3a5f] focus:ring-1 focus:ring-[#1e3a5f] transition"

@@ -95,6 +95,7 @@ export function residentToHousehold(resident, latestBill, reading, allBills = []
     deviceProvisioned: Boolean(resident.device_provisioned),
     deviceLastSeen: resident.device_last_seen || null,
     pulsesPerLiter: resident.pulses_per_liter || 450,
+    passwordResetRequested: Boolean(resident.password_reset_requested),
 
     bill_id: latestBill ? latestBill.id : null,
     history: history.length > 0 ? history : [{ period: "May 2026", prev: 0, curr: 0, amt: MIN_BILL }],

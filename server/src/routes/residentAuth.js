@@ -1,13 +1,10 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
-const crypto = require("crypto");
 const { db } = require("../db/database");
 const { signToken, authMiddleware } = require("../utils/auth");
 const { verifyGoogleToken } = require("../utils/google");
 
 const router = express.Router();
-
-const RESET_CODE_TTL_MS = 15 * 60 * 1000;
 
 function isStrongPassword(value) {
   return (
@@ -20,16 +17,12 @@ function isStrongPassword(value) {
   );
 }
 
-function hashResetCode(code) {
-  return crypto.createHash("sha256").update(String(code)).digest("hex");
-}
-
 // POST /api/resident/login
 // Body: { householdId, password, confirmPassword }
 // First login for a household (no password_hash set yet) creates the
 // password; returning residents authenticate against the stored hash.
 router.post("/login", (req, res) => {
-  const { householdId, password, confirmPassword, email, username } = req.body || {};
+  const { householdId, password, confirmPassword, email, firstName, lastName } = req.body || {};
 
   if (!householdId || !password) {
     return res.json({ success: false, message: "Control number and password are required." });
@@ -57,31 +50,28 @@ router.post("/login", (req, res) => {
       return res.json({ success: false, message: "Passwords do not match." });
     }
 
-    // Optional email / preferred username captured at sign-up.
+    // Optional email + required first/last name captured at sign-up.
     const cleanEmail = typeof email === "string" ? email.trim() : "";
-    const cleanUsername = typeof username === "string" ? username.trim() : "";
+    const cleanFirstName = typeof firstName === "string" ? firstName.trim() : "";
+    const cleanLastName = typeof lastName === "string" ? lastName.trim() : "";
     if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       return res.json({ success: false, message: "Please enter a valid email address." });
     }
-    if (cleanUsername) {
-      const taken = db
-        .prepare("SELECT household_id FROM resident_accounts WHERE username = ? AND household_id != ?")
-        .get(cleanUsername, householdId);
-      if (taken) {
-        return res.json({ success: false, message: "That username is already taken. Please choose another." });
-      }
+    if (!cleanFirstName || !cleanLastName) {
+      return res.json({ success: false, message: "Please enter your first and last name." });
     }
 
     const hash = bcrypt.hashSync(password, 10);
     if (account) {
       db.prepare(
-        "UPDATE resident_accounts SET password_hash = ?, username = COALESCE(NULLIF(?, ''), username), updated_at = datetime('now') WHERE household_id = ?"
-      ).run(hash, cleanUsername, householdId);
+        "UPDATE resident_accounts SET password_hash = ?, updated_at = datetime('now') WHERE household_id = ?"
+      ).run(hash, householdId);
     } else {
       db.prepare(
-        "INSERT INTO resident_accounts (household_id, password_hash, username) VALUES (?, ?, NULLIF(?, ''))"
-      ).run(householdId, hash, cleanUsername);
+        "INSERT INTO resident_accounts (household_id, password_hash) VALUES (?, ?)"
+      ).run(householdId, hash);
     }
+    db.prepare("UPDATE households SET name = ? WHERE id = ?").run(`${cleanFirstName} ${cleanLastName}`, householdId);
     if (cleanEmail) {
       db.prepare("UPDATE households SET email = ? WHERE id = ?").run(cleanEmail, householdId);
     }
@@ -176,9 +166,9 @@ router.post("/google-unlink", authMiddleware("resident"), (req, res) => {
 
 // POST /api/resident/forgot-password
 // Body: { householdId }
-// No email/SMS service is configured for this deployment, so the reset code
-// is returned directly for the frontend to display (same pattern used for
-// the admin forgot-password flow and the GCash mock payment).
+// No verification code involved — this just files a request that an admin
+// sees on the household's record and resolves by setting (and confirming)
+// a new password directly.
 router.post("/forgot-password", (req, res) => {
   const { householdId } = req.body || {};
   if (!householdId) {
@@ -190,64 +180,17 @@ router.post("/forgot-password", (req, res) => {
     return res.json({ success: false, message: "Unknown household / standpost." });
   }
 
-  const code = String(crypto.randomInt(100000, 1000000));
-  const expiresAt = new Date(Date.now() + RESET_CODE_TTL_MS).toISOString();
-  const codeHash = hashResetCode(code);
-
-  const account = db
-    .prepare("SELECT household_id FROM resident_accounts WHERE household_id = ?")
+  const existing = db
+    .prepare("SELECT id FROM password_reset_requests WHERE household_id = ? AND status = 'Pending'")
     .get(householdId);
-  if (account) {
-    db.prepare(
-      "UPDATE resident_accounts SET reset_code_hash = ?, reset_code_expires = ? WHERE household_id = ?"
-    ).run(codeHash, expiresAt, householdId);
-  } else {
-    db.prepare(
-      "INSERT INTO resident_accounts (household_id, reset_code_hash, reset_code_expires) VALUES (?, ?, ?)"
-    ).run(householdId, codeHash, expiresAt);
+  if (!existing) {
+    db.prepare("INSERT INTO password_reset_requests (household_id) VALUES (?)").run(householdId);
   }
 
-  return res.json({ success: true, resetCode: code, expiresInMinutes: RESET_CODE_TTL_MS / 60000 });
-});
-
-// POST /api/resident/reset-password
-// Body: { householdId, code, newPassword, confirmPassword }
-router.post("/reset-password", (req, res) => {
-  const { householdId, code, newPassword, confirmPassword } = req.body || {};
-  if (!householdId || !code || !newPassword) {
-    return res.json({ success: false, message: "Household, code, and new password are required." });
-  }
-  if (!isStrongPassword(newPassword)) {
-    return res.json({
-      success: false,
-      message:
-        "Password must be at least 8 characters and include uppercase, lowercase, a number, and a symbol.",
-    });
-  }
-  if (newPassword !== confirmPassword) {
-    return res.json({ success: false, message: "Passwords do not match." });
-  }
-
-  const account = db
-    .prepare("SELECT * FROM resident_accounts WHERE household_id = ?")
-    .get(householdId);
-  if (!account || !account.reset_code_hash || !account.reset_code_expires) {
-    return res.json({ success: false, message: "No reset request found for this household. Request a new code." });
-  }
-  if (new Date(account.reset_code_expires).getTime() < Date.now()) {
-    return res.json({ success: false, message: "This reset code has expired. Request a new one." });
-  }
-  if (hashResetCode(code) !== account.reset_code_hash) {
-    return res.json({ success: false, message: "Incorrect reset code." });
-  }
-
-  db.prepare(
-    `UPDATE resident_accounts
-     SET password_hash = ?, reset_code_hash = NULL, reset_code_expires = NULL, updated_at = datetime('now')
-     WHERE household_id = ?`
-  ).run(bcrypt.hashSync(newPassword, 10), householdId);
-
-  return res.json({ success: true });
+  return res.json({
+    success: true,
+    message: "Your request has been sent to the barangay water office. An admin will set your new password and let you know.",
+  });
 });
 
 module.exports = router;

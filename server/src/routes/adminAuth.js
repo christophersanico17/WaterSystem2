@@ -3,6 +3,7 @@ const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const { db } = require("../db/database");
 const { signToken } = require("../utils/auth");
+const { fullName } = require("../utils/names");
 
 const router = express.Router();
 
@@ -13,12 +14,12 @@ function hashResetCode(code) {
 }
 
 // POST /api/admin/login
-// Body: { email, password }
+// Body: { email, password, firstName, lastName }
 router.post("/login", (req, res) => {
-  const { email, password } = req.body || {};
+  const { email, password, firstName, lastName } = req.body || {};
 
-  if (!email || !password) {
-    return res.json({ success: false, message: "Email and password are required." });
+  if (!email || !password || !firstName || !lastName) {
+    return res.json({ success: false, message: "First name, last name, email, and password are all required." });
   }
 
   const admin = db
@@ -37,9 +38,30 @@ router.post("/login", (req, res) => {
     return res.json({ success: false, message: "Incorrect password." });
   }
 
+  // First and last name must match what's on file for this account — this
+  // is what makes the name in the audit log trustworthy rather than just
+  // whatever the person typed. A mismatch usually means the wrong account
+  // (e.g. you meant to sign in as a coworker but typed your own email).
+  const firstMatches = String(firstName).trim().toLowerCase() === String(admin.first_name || "").trim().toLowerCase();
+  const lastMatches = String(lastName).trim().toLowerCase() === String(admin.last_name || "").trim().toLowerCase();
+  if (!firstMatches || !lastMatches) {
+    return res.json({
+      success: false,
+      message: "That name doesn't match our records for this account. Check the spelling, or confirm you're using the right email.",
+    });
+  }
+
   const staffRole = admin.role || "officer";
-  const token = signToken({ role: "admin", email: admin.email, staffRole });
-  return res.json({ success: true, token, email: admin.email, role: staffRole });
+  const name = fullName(admin);
+  const token = signToken({
+    role: "admin",
+    email: admin.email,
+    staffRole,
+    firstName: admin.first_name,
+    lastName: admin.last_name,
+    name,
+  });
+  return res.json({ success: true, token, email: admin.email, role: staffRole, firstName: admin.first_name, lastName: admin.last_name, name });
 });
 
 // POST /api/admin/forgot-password

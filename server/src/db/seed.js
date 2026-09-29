@@ -70,7 +70,7 @@ function seed() {
   `);
 
   const insertAdmin = db.prepare(`
-    INSERT INTO admin_accounts (email, password_hash) VALUES (@email, @password_hash)
+    INSERT INTO admin_accounts (email, password_hash, first_name, last_name) VALUES (@email, @password_hash, @first_name, @last_name)
   `);
 
   const tx = db.transaction(() => {
@@ -78,6 +78,8 @@ function seed() {
     insertAdmin.run({
       email: "admin@barangay.local",
       password_hash: bcrypt.hashSync("admin12345", 10),
+      first_name: "Water",
+      last_name: "Officer",
     });
 
     const historyTemplate = [

@@ -1,4 +1,6 @@
 require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
@@ -7,6 +9,7 @@ require("./db/database"); // ensures schema is created on boot
 
 const residentAuthRoutes = require("./routes/residentAuth");
 const adminAuthRoutes = require("./routes/adminAuth");
+const adminAccountRoutes = require("./routes/adminAccounts");
 const dataRoutes = require("./routes/data");
 const announcementRoutes = require("./routes/announcements");
 const auditRoutes = require("./routes/audit");
@@ -14,9 +17,19 @@ const webhookRoutes = require("./routes/webhooks");
 const deviceRoutes = require("./routes/devices");
 const eventRoutes = require("./routes/events");
 const settingsRoutes = require("./routes/settings");
+const { startDiscoveryResponder } = require("./utils/discovery");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+
+// Behind a hosting provider's reverse proxy (Railway, Render, ...) every
+// request arrives from the proxy's IP, with the real client IP in
+// X-Forwarded-For. Without this, the per-IP rate limiters below would lump
+// every user (and every meter) into one shared bucket. Set TRUST_PROXY=1 in
+// the host's environment; leave unset for local development.
+if (process.env.TRUST_PROXY) {
+  app.set("trust proxy", Number(process.env.TRUST_PROXY) || 1);
+}
 
 app.use(
   cors({
@@ -57,6 +70,7 @@ app.use("/api/admin/reset-password", loginLimiter);
 
 app.use("/api/resident", residentAuthRoutes);
 app.use("/api/admin", adminAuthRoutes);
+app.use("/api/admin", adminAccountRoutes);
 app.use("/api/announcements", announcementRoutes);
 app.use("/api/audit", auditRoutes);
 app.use("/api/events", eventRoutes);
@@ -66,6 +80,20 @@ app.use("/api/events", eventRoutes);
 app.use("/api", deviceRoutes);
 app.use("/api", dataRoutes);
 app.use("/api", settingsRoutes);
+
+// In production the built frontend (`npm run build` at the repo root →
+// dist/) is served from this same server, so the whole system lives at one
+// public URL and the browser calls the API same-origin at /api. Any non-API
+// GET falls back to index.html so client-side routes survive a page reload.
+// Skipped in local development, where Vite serves the frontend on :5173.
+const DIST_DIR = path.join(__dirname, "..", "..", "dist");
+if (fs.existsSync(path.join(DIST_DIR, "index.html"))) {
+  app.use(express.static(DIST_DIR));
+  app.use((req, res, next) => {
+    if (req.method !== "GET" || req.path.startsWith("/api")) return next();
+    res.sendFile(path.join(DIST_DIR, "index.html"));
+  });
+}
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found." });
@@ -82,6 +110,10 @@ app.listen(PORT, () => {
   console.log(`  Listening on http://localhost:${PORT}`);
   console.log(`  Health check: http://localhost:${PORT}/api/health\n`);
 });
+
+// Lets flow-meter devices find this machine on the LAN by broadcast instead
+// of a hardcoded IP — see utils/discovery.js.
+startDiscoveryResponder(PORT);
 
 // Periodic sweep for devices that have gone silent (dead battery, lost
 // Wi-Fi, etc.) — see routes/devices.js. Real-time flow/leak detection runs

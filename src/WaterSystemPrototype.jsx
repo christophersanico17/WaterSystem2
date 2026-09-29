@@ -8,11 +8,12 @@ import {
   getToken, adminLogin, adminLogout,
   fetchResidents, fetchBills, fetchBillingPeriods, generateBills,
   fetchReadings, fetchLatestReading,
-  initiateGcash, recordCash, recordUnpaid, confirmGcash, syncGcashByHousehold, fetchPayments,
+  initiateGcash, recordCash, recordUnpaid, confirmGcash, initiateCash, confirmCash, syncGcashByHousehold, fetchPayments,
   residentLogin, residentGoogleLogin, residentLogout,
-  updateResidentProfile, resetResidentPassword, resolveAlertApi, unresolveAlertApi,
+  updateResidentProfile, resetResidentPassword, confirmResidentPasswordReset, resolveAlertApi, unresolveAlertApi,
   createHousehold, fetchAlerts, fetchMyAlerts,
   fetchDeviceStatus, provisionDevice, revokeDevice, setDeviceCalibration, liveEventsUrl,
+  updateAdminProfile,
 } from "./api";
 import { residentToHousehold } from "./databridge.js";
 import { jwtDecode } from "jwt-decode";
@@ -54,6 +55,7 @@ export default function WaterSystemPrototype() {
   const [residentAuthenticated, setResidentAuthenticated] = useState(!!residentSession);
   const [adminEmail, setAdminEmail] = useState(adminSession?.email || "");
   const [adminRole, setAdminRole] = useState(adminSession?.staffRole || "officer");
+  const [adminName, setAdminName] = useState(adminSession?.name || "");
   const [residentLoginHouseholdId, setResidentLoginHouseholdId] = useState(null);
 
   // shared state — populated either from API or from mock data
@@ -72,6 +74,10 @@ export default function WaterSystemPrototype() {
   const [confirmAlert, setConfirmAlert] = useState(null);
   const [paymentStep, setPaymentStep] = useState("confirm");
   const [paymentReceipt, setPaymentReceipt] = useState(null);
+  // Which method the resident picked in the payment modal — "gcash" (goes
+  // through PayMongo) or "cash" (declares intent to pay in person; an admin
+  // must confirm the handoff before the bill becomes Paid).
+  const [paymentMethod, setPaymentMethod] = useState("gcash");
   const [loading, setLoading] = useState(USE_API);
 
   const toastTimer = useRef(null);
@@ -89,12 +95,28 @@ export default function WaterSystemPrototype() {
   const loadFromAPI = useCallback(async (silent = false) => {
     try {
       if (!silent) setLoading(true);
-      const [residents, bills, periods, rawAlerts] = await Promise.all([
+      // allSettled, not all: /bills and /alerts now require a signed-in
+      // admin or resident (they used to leak every household's data to
+      // anyone — see server/src/routes/data.js). This loader also runs
+      // pre-login (to populate the resident login screen's household
+      // picker, which only needs /residents' anonymous minimal-fields
+      // response), so those two are expected to 401/403 at that point —
+      // that's correct, not a failure to recover from, hence the fallback
+      // to [] below rather than bailing out to mock data.
+      const [residentsResult, billsResult, periodsResult, alertsResult] = await Promise.allSettled([
         fetchResidents(),
         fetchBills(),
         fetchBillingPeriods(),
         fetchAlerts(),
       ]);
+      const residents = residentsResult.status === "fulfilled" ? residentsResult.value : [];
+      const bills = billsResult.status === "fulfilled" ? billsResult.value : [];
+      const periods = periodsResult.status === "fulfilled" ? periodsResult.value : [];
+      const rawAlerts = alertsResult.status === "fulfilled" ? alertsResult.value : [];
+
+      if (residentsResult.status === "rejected") {
+        throw residentsResult.reason; // the one fetch that must always succeed
+      }
 
       // Group bills by household. Bill rows from GET /api/bills carry
       // `household_id` (not `resident_id` — that field only exists on rows
@@ -225,16 +247,17 @@ export default function WaterSystemPrototype() {
   }, [households.length]);
 
   // ── Admin login (Google) ─────────────────────────────────────
-  async function handleAdminLogin({ email, password }) {
-    if (!email || !password) {
-      return { success: false, message: "Email and password are required." };
+  async function handleAdminLogin({ email, password, firstName, lastName }) {
+    if (!email || !password || !firstName || !lastName) {
+      return { success: false, message: "First name, last name, email, and password are all required." };
     }
 
     if (USE_API) {
       try {
-        const user = await adminLogin(email, password);
+        const user = await adminLogin(email, password, firstName, lastName);
         setAdminEmail(user.email || email);
         setAdminRole(user.role || "officer");
+        setAdminName(user.name || "");
         setAdminAuthenticated(true);
         setAdminPage("dashboard");
         return { success: true };
@@ -251,14 +274,31 @@ export default function WaterSystemPrototype() {
     }
 
     setAdminEmail(email);
+    setAdminName(`${firstName} ${lastName}`.trim());
     setAdminAuthenticated(true);
     setAdminPage("dashboard");
     return { success: true };
   }
 
+  // Self-service profile edit (any signed-in admin, own account only).
+  async function handleUpdateAdminProfile(updates) {
+    if (!USE_API) {
+      return { success: false, message: "Profile editing isn't available in demo mode." };
+    }
+    try {
+      const result = await updateAdminProfile(updates);
+      setAdminEmail(result.email || adminEmail);
+      setAdminName(result.name || adminName);
+      return { success: true };
+    } catch (err) {
+      return { success: false, message: err.message };
+    }
+  }
+
   function handleAdminLogout() {
     if (USE_API) adminLogout();
     setAdminEmail("");
+    setAdminName("");
     setAdminAuthenticated(false);
     setAdminPage("login");
   }
@@ -268,10 +308,10 @@ export default function WaterSystemPrototype() {
     return value.length >= 8 && /[A-Z]/.test(value) && /[a-z]/.test(value) && /[0-9]/.test(value) && /[^A-Za-z0-9]/.test(value);
   }
 
-  async function handleResidentLogin({ householdId, password, confirmPassword, email, username }) {
+  async function handleResidentLogin({ householdId, password, confirmPassword, email, firstName, lastName }) {
     if (USE_API) {
       try {
-        const result = await residentLogin({ householdId, password, confirmPassword, email, username });
+        const result = await residentLogin({ householdId, password, confirmPassword, email, firstName, lastName });
         if (result.success) {
           setActiveResidentId(householdId);
           setResidentAuthenticated(true);
@@ -346,6 +386,9 @@ export default function WaterSystemPrototype() {
 
   // ── Resident profile edits ──────────────────────────────────
   async function handleUpdateProfile(householdId, updates) {
+    // Password fields are write-only — send them to the API but never let
+    // them land in app state (React devtools, re-renders, etc).
+    const { currentPassword, newPassword, ...displayUpdates } = updates;
     if (USE_API) {
       try {
         await updateResidentProfile(householdId, updates);
@@ -354,7 +397,7 @@ export default function WaterSystemPrototype() {
       }
     }
     setHouseholds((prev) =>
-      prev.map((h) => (h.id === householdId ? { ...h, ...updates } : h))
+      prev.map((h) => (h.id === householdId ? { ...h, ...displayUpdates } : h))
     );
     return { success: true };
   }
@@ -372,6 +415,27 @@ export default function WaterSystemPrototype() {
     }
     setHouseholds((prev) => prev.map((h) => (h.id === householdId ? { ...h, password: null } : h)));
     showToast(`${householdId} password reset — resident must set a new one on next login.`, "info");
+  }
+
+  // Admin types the resident's new password directly and confirms it —
+  // resolves any pending "forgot password" request without a code.
+  async function handleConfirmPasswordReset(householdId, newPassword) {
+    if (!USE_API) {
+      setHouseholds((prev) =>
+        prev.map((h) => (h.id === householdId ? { ...h, password: newPassword, passwordResetRequested: false } : h))
+      );
+      showToast(`${householdId} password set and confirmed.`, "success");
+      return { success: true };
+    }
+    try {
+      await confirmResidentPasswordReset(householdId, newPassword);
+      await loadFromAPI(true);
+      showToast(`${householdId} password set and confirmed.`, "success");
+      return { success: true };
+    } catch (err) {
+      showToast("Could not set the new password: " + err.message, "warn");
+      return { success: false, message: err.message };
+    }
   }
 
   async function handleAddHousehold(payload) {
@@ -545,12 +609,16 @@ export default function WaterSystemPrototype() {
   }
 
   // ── Mark paid ────────────────────────────────────────────────
+  // paymentMethod is whichever the admin picked in the confirm modal —
+  // "Offline" (cash, received in person) or "GCash" (recorded manually,
+  // e.g. the resident paid but staff confirmed it by other means rather
+  // than through the automatic PayMongo flow).
   async function markPaid(id, paymentMethod = "Offline", paymentStamp) {
     if (USE_API) {
       try {
         const household = households.find((h) => h.id === id);
         if (!household?.bill_id) throw new Error("No bill found for this household.");
-        await recordCash(household.bill_id, household.totalDue);
+        await recordCash(household.bill_id, household.totalDue, paymentMethod);
         await loadFromAPI(true); // refresh from backend
         showToast("Payment recorded.", "success");
       } catch (err) {
@@ -617,6 +685,33 @@ export default function WaterSystemPrototype() {
     showToast(`${id} GCash payment received and confirmed`, "success");
   }
 
+  // Admin confirms cash they've physically received for a resident's
+  // "Cash Pending" bill — the only way a cash payment ever becomes Paid.
+  async function receiveCashPayment(id) {
+    if (USE_API) {
+      try {
+        const household = households.find((h) => h.id === id);
+        if (!household?.bill_id) throw new Error("No bill found for this household.");
+        await confirmCash(household.bill_id);
+        await loadFromAPI(true); // refresh from backend
+        showToast(`${id} cash payment received and confirmed`, "success");
+      } catch (err) {
+        showToast("Cash confirmation error: " + err.message, "warn");
+      }
+      return;
+    }
+
+    // Mock path
+    setHouseholds((prev) =>
+      prev.map((h) =>
+        h.id === id && h.paymentStatus === "Cash Pending"
+          ? { ...h, paymentStatus: "Paid" }
+          : h
+      )
+    );
+    showToast(`${id} cash payment received and confirmed`, "success");
+  }
+
   // Opening the confirmation modal — both the table row and the detail panel
   // route through these so resolving/unresolving always asks first. Unresolve
   // exists so an admin can undo an alert that was resolved by accident.
@@ -644,14 +739,37 @@ export default function WaterSystemPrototype() {
     showToast(`Alert marked as ${nextStatus.toLowerCase()}`, "success");
   }
 
-  // ── GCash payment ────────────────────────────────────────────
-  function startGcashPayment(id) {
+  // ── Payment (GCash or Cash) ─────────────────────────────────────
+  // method: "gcash" (default, PayMongo checkout) or "cash" (declares intent
+  // to pay in person — see confirmGcashPayment's "cash" branch below).
+  function startGcashPayment(id, method = "gcash") {
     setPaymentModal(id);
+    setPaymentMethod(method);
     setPaymentStep("confirm");
   }
 
   async function confirmGcashPayment() {
     setPaymentStep("processing");
+
+    if (paymentMethod === "cash") {
+      try {
+        const household = households.find((h) => h.id === paymentModal);
+        if (!household?.bill_id) throw new Error("No bill found.");
+        if (USE_API) {
+          await initiateCash(household.bill_id);
+          await loadFromAPI(true);
+        } else {
+          setHouseholds((prev) =>
+            prev.map((h) => (h.id === paymentModal ? { ...h, paymentStatus: "Cash Pending", paymentMethod: "Offline" } : h))
+          );
+        }
+        setPaymentStep("cash-pending");
+      } catch (err) {
+        setPaymentStep("confirm");
+        showToast("Cash payment error: " + err.message, "warn");
+      }
+      return;
+    }
 
     if (USE_API) {
       try {
@@ -743,7 +861,7 @@ export default function WaterSystemPrototype() {
     }
   }, [residentAuthenticated]); // eslint-disable-line
 
-  const unpaidCount = households.filter((h) => h.paymentStatus === "Unpaid" || h.paymentStatus === "GCash Pending").length;
+  const unpaidCount = households.filter((h) => h.paymentStatus === "Unpaid" || h.paymentStatus === "GCash Pending" || h.paymentStatus === "Cash Pending").length;
   const billsGenerated = households.length;
 
   if (loading) {
@@ -775,11 +893,14 @@ export default function WaterSystemPrototype() {
           adminAuthenticated={adminAuthenticated}
           onAdminLogin={handleAdminLogin}
           onAdminLogout={handleAdminLogout}
+          onUpdateAdminProfile={handleUpdateAdminProfile}
           adminEmail={adminEmail}
           adminRole={adminRole}
+          adminName={adminName}
           markPaid={markPaid}
           markUnpaid={markUnpaid}
           receiveGcashPayment={receiveGcashPayment}
+          receiveCashPayment={receiveCashPayment}
           showToast={showToast}
           alertFilter={alertFilter}
           setAlertFilter={setAlertFilter}
@@ -788,6 +909,7 @@ export default function WaterSystemPrototype() {
           resolveAlert={resolveAlert}
           unresolveAlert={unresolveAlert}
           onResetResidentPassword={handleResetResidentPassword}
+          onConfirmPasswordReset={handleConfirmPasswordReset}
           onGenerateBills={handleGenerateBills}
           onAddHousehold={handleAddHousehold}
           onProvisionDevice={handleProvisionDevice}
@@ -819,12 +941,14 @@ export default function WaterSystemPrototype() {
         <GcashModal
           household={households.find((h) => h.id === paymentModal)}
           step={paymentStep}
+          method={paymentMethod}
           receipt={paymentReceipt}
           onConfirm={confirmGcashPayment}
           onClose={() => {
             setPaymentModal(null);
             setPaymentStep("confirm");
             setPaymentReceipt(null);
+            setPaymentMethod("gcash");
           }}
         />
       )}
