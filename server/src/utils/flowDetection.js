@@ -39,13 +39,48 @@ function computeLeakStreakMinutes(recentReadingsDesc, settings, nowMs) {
   return (nowMs - toMs(streakStart)) / 60000;
 }
 
+// Nearest-rank percentile of an unsorted array of numbers (p in 0..100).
+function percentile(values, p) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = Math.ceil((p / 100) * sorted.length);
+  return sorted[Math.min(sorted.length, Math.max(1, rank)) - 1];
+}
+
+// Works out a household's own High Flow threshold from its recent flow rates
+// (only readings where water was actually running, i.e. flow_rate > 0).
+//
+// A fixed threshold for everyone keeps alerting on households whose normal
+// usage is simply heavier (bigger family, a pump filling a tank...). So once
+// there's enough history, the threshold becomes that household's typical
+// peak flow (95th percentile — occasional spikes don't count as "typical")
+// times highFlowLearnMultiplier. It is clamped to:
+//   - never below highFlowLpm: that stays the minimum, and the threshold
+//     used until the household has highFlowMinSamples readings of history;
+//   - never above highFlowMaxLpm: a real burst is always flagged, even if
+//     the history the threshold learned from was itself unusually high.
+function computeAdaptiveHighFlowLpm(activeFlowRates, settings) {
+  const floor = settings.highFlowLpm;
+  const cap = Math.max(settings.highFlowMaxLpm, floor);
+  const samples = activeFlowRates.length;
+
+  if (samples < settings.highFlowMinSamples) {
+    return { thresholdLpm: floor, learned: false, typicalPeakLpm: null, samples };
+  }
+
+  const typicalPeakLpm = percentile(activeFlowRates, 95);
+  const learnedLpm = typicalPeakLpm * settings.highFlowLearnMultiplier;
+  const thresholdLpm = +Math.min(cap, Math.max(floor, learnedLpm)).toFixed(1);
+  return { thresholdLpm, learned: true, typicalPeakLpm: +typicalPeakLpm.toFixed(2), samples };
+}
+
 // Decides which real-time alert type(s), if any, a single flow-rate reading
 // plus its leak streak should raise. A reading can be both a burst (High
 // Flow) and part of a longer leak streak at the same time, so this returns
-// an array rather than a single verdict.
-function classifyRealTimeFlow(flowRateLpm, streakMinutes, settings) {
+// an array rather than a single verdict. `highFlowLpm` is the household's
+// own threshold (computeAdaptiveHighFlowLpm), defaulting to the global one.
+function classifyRealTimeFlow(flowRateLpm, streakMinutes, settings, highFlowLpm = settings.highFlowLpm) {
   const types = [];
-  if (flowRateLpm >= settings.highFlowLpm) types.push("High Flow");
+  if (flowRateLpm >= highFlowLpm) types.push("High Flow");
   if (flowRateLpm >= settings.leakFlowLpm && streakMinutes >= settings.leakSustainedMinutes) {
     types.push("Leak Detected");
   }
@@ -64,6 +99,7 @@ function classifyConsumptionRatio(consumption, avgConsumption, settings) {
 module.exports = {
   toMs,
   computeLeakStreakMinutes,
+  computeAdaptiveHighFlowLpm,
   classifyRealTimeFlow,
   classifyConsumptionRatio,
 };

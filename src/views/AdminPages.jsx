@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Badge, StatCard, Btn } from "../ui/atoms";
 import { SectionHeader } from "../components/SectionHeader";
 import { BillReplica } from "../components/BillReplica";
+import { deviceStatus, isDeviceOnline, DEVICE_STATUS_TICK_MS } from "../deviceStatus";
 import { BILLING_PERIOD, RATE_PER_CM3, MIN_BILL, dateStamp, peso, isOverdue, daysOverdue } from "../data";
 import {
   fetchAnnouncements,
@@ -11,6 +12,7 @@ import {
   fetchAuditLog,
   fetchAlertSettings,
   updateAlertSettingsApi,
+  fetchDeviceStatus,
   fetchAdminAccounts,
   createAdminAccount,
   deleteAdminAccount,
@@ -872,22 +874,71 @@ export function AlertsPage({ alerts, filter, setFilter, selectedAlertId, setSele
   );
 }
 
-// Freshness-based status for a household's flow-sensor device. Devices are
-// expected to report every few seconds to a couple of minutes, so:
-//   < 90s   -> actively transmitting right now
-//   < 10min -> was transmitting recently (brief WiFi hiccup, still fine)
-//   older   -> treat as offline (dead battery, WiFi down, unplugged, etc.)
+// Freshness-based status for a household's flow-sensor device (thresholds
+// in src/deviceStatus.js, shared with the resident view).
 function DeviceStatusBadge({ household }) {
-  if (!household.deviceProvisioned) {
-    return <span className="text-slate-400">Not connected</span>;
+  const status = deviceStatus(household);
+  return <span className={`${status.tone} font-medium`}>{status.label}</span>;
+}
+
+// Liters used in each of the last 60 seconds, newest on the right. The device
+// reports every ~15s, and each report carries its per-second counts, so the
+// chart gains ~15 bars at a time (and lags live by up to ~15s).
+// Kept only in the browser, so it starts empty when the page loads.
+const PER_SECOND_SLOTS = 60;
+
+function PerSecondUsageChart({ liters }) {
+  const [hovered, setHovered] = useState(null);
+
+  if (!liters.length) {
+    return (
+      <div className="rounded-lg border border-slate-100 px-3 py-2 text-[11px] text-slate-400">
+        Per-second usage appears here with the next report from the sensor (within about 15 seconds; needs the updated ESP firmware).
+      </div>
+    );
   }
-  if (!household.deviceLastSeen) {
-    return <span className="text-amber-600 font-medium">Provisioned — awaiting first reading</span>;
-  }
-  const ageMs = Date.now() - new Date(household.deviceLastSeen.replace(" ", "T") + "Z").getTime();
-  if (ageMs < 90_000) return <span className="text-emerald-600 font-medium">● Online</span>;
-  if (ageMs < 10 * 60_000) return <span className="text-amber-600 font-medium">● Recently active</span>;
-  return <span className="text-red-600 font-medium">● Offline</span>;
+
+  const slots = [...Array(Math.max(0, PER_SECOND_SLOTS - liters.length)).fill(null), ...liters];
+  const max = Math.max(0.05, ...liters);
+  const total = liters.reduce((sum, l) => sum + l, 0);
+
+  return (
+    <div className="rounded-lg border border-slate-100 px-3 py-2">
+      <div className="flex items-baseline justify-between text-[11px] mb-1.5">
+        <span className="text-slate-500 font-medium">Per-second usage</span>
+        <span className="text-slate-600">
+          {hovered
+            ? `${hovered.ago}s ago: ${hovered.liters.toFixed(3)} L`
+            : `Last ${liters.length} s: ${total.toFixed(2)} L`}
+        </span>
+      </div>
+      <div
+        className="flex items-end gap-[2px] h-16 border-b border-slate-200"
+        role="img"
+        aria-label={`Liters used per second over the last ${liters.length} seconds; ${total.toFixed(2)} L in total.`}
+        onMouseLeave={() => setHovered(null)}
+      >
+        {slots.map((l, i) => (
+          <div
+            key={i}
+            className="flex-1 h-full flex items-end"
+            onMouseEnter={() => l !== null && setHovered({ liters: l, ago: PER_SECOND_SLOTS - 1 - i })}
+          >
+            {l !== null && (
+              <div
+                className={`w-full rounded-t ${hovered && hovered.ago === PER_SECOND_SLOTS - 1 - i ? "bg-sky-700" : "bg-sky-500"}`}
+                style={{ height: `${(l / max) * 100}%` }}
+              />
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+        <span>60 s ago</span>
+        <span>now</span>
+      </div>
+    </div>
+  );
 }
 
 // Provisioning + calibration UI for one household's Arduino/ESP flow-sensor
@@ -896,6 +947,23 @@ function DeviceManager({ household, onProvisionDevice, onRevokeDevice, onSetDevi
   const [revealedKey, setRevealedKey] = useState(null);
   const [calibration, setCalibration] = useState(household.pulsesPerLiter);
   const [busy, setBusy] = useState(false);
+  const [highFlow, setHighFlow] = useState(null);
+
+  // The household's own High Flow threshold, learned by the server from its
+  // usage history. It moves slowly (days of data), so fetching it when the
+  // card opens is enough — no need to follow every live reading.
+  useEffect(() => {
+    if (!household.deviceProvisioned) return;
+    let cancelled = false;
+    fetchDeviceStatus(household.id)
+      .then((status) => {
+        if (!cancelled) setHighFlow(status.highFlow || null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [household.id, household.deviceProvisioned]);
 
   useEffect(() => {
     setCalibration(household.pulsesPerLiter);
@@ -965,6 +1033,17 @@ function DeviceManager({ household, onProvisionDevice, onRevokeDevice, onSetDevi
           <div className="text-[10px] text-amber-700">
             Paste it into the firmware's <code>config.h</code> as <code>DEVICE_KEY</code>, then flash/reboot the device.
           </div>
+        </div>
+      )}
+
+      {highFlow && (
+        <div className="text-slate-500">
+          High-flow alert at: <span className="font-medium text-slate-700">{highFlow.thresholdLpm} L/min</span>{" "}
+          <span className="text-[10px] text-slate-400">
+            {highFlow.learned
+              ? `learned from this household's usage (typical peak ${highFlow.typicalPeakLpm} L/min)`
+              : `default — learning (${highFlow.samples} readings of usage so far)`}
+          </span>
         </div>
       )}
 
@@ -1057,7 +1136,7 @@ export function HouseholdsPage({
   // ages into "Offline" on screen even when nothing else changes.
   const [, forceTick] = React.useState(0);
   React.useEffect(() => {
-    const id = setInterval(() => forceTick((n) => n + 1), 30_000);
+    const id = setInterval(() => forceTick((n) => n + 1), DEVICE_STATUS_TICK_MS);
     return () => clearInterval(id);
   }, []);
 
@@ -1143,9 +1222,11 @@ export function HouseholdsPage({
                       />
                     )}
                     {(() => {
-                      const connected = h.deviceProvisioned && Boolean(h.deviceLastSeen);
-                      const flowing = connected && (h.lastFlow || 0) > 0;
-                      const isHighFlow = connected && h.flowType === "High flow";
+                      // An offline sensor's last flow value is stale, not
+                      // "live" — show it only while the device is reporting.
+                      const online = isDeviceOnline(h);
+                      const flowing = online && (h.lastFlow || 0) > 0;
+                      const isHighFlow = online && h.flowType === "High flow";
                       return (
                         <div
                           className={`flex items-center justify-between rounded-lg px-3 py-2 ${
@@ -1153,19 +1234,24 @@ export function HouseholdsPage({
                           }`}
                         >
                           <span className="text-slate-500 font-medium">Live flow</span>
-                          {connected ? (
+                          {online ? (
                             <span className={`text-xl font-bold ${isHighFlow ? "text-amber-700" : flowing ? "text-sky-700" : "text-slate-600"}`}>
                               {(h.lastFlow || 0).toFixed(1)} <span className="text-xs font-medium">L/min</span>
                               {isHighFlow && <span className="ml-1.5 text-xs font-semibold text-amber-600">High flow</span>}
                             </span>
                           ) : (
                             <span className="text-[13px] font-medium text-slate-400">
-                              {h.deviceProvisioned ? "Awaiting first reading" : "No sensor connected"}
+                              {!h.deviceProvisioned
+                                ? "No sensor connected"
+                                : h.deviceLastSeen
+                                ? "— Sensor offline"
+                                : "Awaiting first reading"}
                             </span>
                           )}
                         </div>
                       );
                     })()}
+                    {isDeviceOnline(h) && <PerSecondUsageChart liters={h.perSecondLiters || []} />}
                     <div className="grid grid-cols-2 gap-2">
                       <div>Current reading: <span className="font-semibold text-slate-800">{h.currCm3} CM³</span></div>
                       <div>Previous reading: <span className="font-semibold text-slate-800">{h.prevCm3} CM³</span></div>
@@ -1652,7 +1738,12 @@ export function SettingsPage({ showToast, adminEmail }) {
 // effect immediately: routes/devices.js's real-time check and routes/data.js's
 // per-cycle check both read them fresh on every run, no restart needed.
 const ALERT_SETTINGS_FIELDS = [
-  { key: "highFlowLpm", label: "High-flow burst", unit: "L/min", help: "A single reading at/above this = a wide-open tap or burst." },
+  { key: "highFlowLpm", label: "High-flow minimum", unit: "L/min", help: "High Flow threshold until a household has usage history — and the lowest it can ever learn." },
+  { key: "highFlowLearnMultiplier", label: "High-flow learning", unit: "× typical peak", help: "Each household's threshold = its own typical peak flow × this." },
+  { key: "highFlowLearnDays", label: "Learn from last", unit: "days", help: "How much of a household's reading history the threshold is learned from." },
+  { key: "highFlowMinSamples", label: "Learning starts after", unit: "readings", help: "Readings with water flowing needed before a household's threshold is learned." },
+  { key: "highFlowMaxLpm", label: "High-flow maximum", unit: "L/min", help: "Learning never raises a threshold above this — a real burst is always flagged." },
+  { key: "maxPlausibleFlowLpm", label: "Sensor fault above", unit: "L/min", help: "Faster than any real household flow = wiring noise. Discarded (not billed) and raises a \"Sensor Fault\" alert." },
   { key: "leakFlowLpm", label: "Leak flow floor", unit: "L/min", help: "Low but non-zero flow — the signature of a persistent drip." },
   { key: "leakSustainedMinutes", label: "Leak sustained for", unit: "min", help: "...continuously at/above the floor before it counts as a leak." },
   { key: "deviceSilenceMinutes", label: "Device silence", unit: "min", help: "No readings from a connected device for this long -> \"No Sensor Data\"." },

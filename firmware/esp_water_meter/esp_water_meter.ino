@@ -8,17 +8,14 @@
 // factor, so recalibrating never requires reflashing a device in the field.
 //
 // Setup:
-//   1. Copy config.example.h to config.h and fill in the device key from the
-//      admin panel (Households → expand a household → "Generate device
-//      key"). No server IP needed — the device finds the server on the LAN
-//      by broadcast (see discoverServer()). See ../README.md.
+//   1. Copy config.example.h to config.h and fill in your WiFi name/password
+//      and the device key from the admin panel (Households → expand a
+//      household → "Generate device key"). No server IP needed — the device
+//      finds the server on the LAN by broadcast (see discoverServer()).
+//      See ../README.md.
 //   2. Board Manager: install "esp8266" (for NodeMCU/Wemos) or "esp32"
 //      (for ESP32 dev boards) via Tools → Board → Boards Manager.
-//   3. Library Manager: install "WiFiManager" by tzapu (search "WiFiManager",
-//      pick the one by tzapu — not "WiFiManager" by anyone else). Handles
-//      WiFi setup: no SSID/password in code at all — see the WiFi section
-//      below and the setup guide for how first-time pairing works.
-//   4. Select your board, the correct port, and upload.
+//   3. Select your board, the correct port, and upload.
 //
 // Wiring (see ../README.md for the full diagram):
 //   Flow sensor VCC (red)    -> 5V / VIN
@@ -41,9 +38,6 @@
 #endif
 
 #include <WiFiUdp.h>
-#include <WiFiManager.h> // tzapu/WiFiManager — Library Manager, search "WiFiManager"
-
-WiFiManager wifiManager;
 
 // ── Server discovery ────────────────────────────────────────
 // Filled in at runtime by discoverServer() (e.g. "http://192.168.254.144:4000")
@@ -64,9 +58,47 @@ bool wasWiFiConnected = false;
 // from the main loop with interrupts briefly disabled, so a pulse can never
 // be counted twice or dropped between the two.
 volatile unsigned long pulseCount = 0;
+volatile unsigned long secondPulseCount = 0; // same pulses, but reset every second for per-second samples
+
+// Noise filter: a loose or floating signal wire can fire this interrupt
+// hundreds of thousands of times a second. A real YF-S201 at its ~30 L/min
+// maximum pulses about every 4.4 ms, so edges closer together than 1 ms
+// can't be water and are ignored. (The server separately discards any
+// report that still works out to an impossible flow rate.)
+const unsigned long MIN_PULSE_GAP_US = 1000;
+volatile unsigned long lastPulseUs = 0;
 
 void IRAM_ATTR onPulse() {
+  unsigned long nowUs = micros();
+  if (nowUs - lastPulseUs < MIN_PULSE_GAP_US) return;
+  lastPulseUs = nowUs;
   pulseCount++;
+  secondPulseCount++;
+}
+
+// ── Per-second samples ──────────────────────────────────────
+// Pulses counted in each ~1-second slot since the last successful report,
+// oldest first. Sent along with every report so the dashboard can show
+// per-second usage without the device having to report every second (which
+// would multiply requests and database rows by 10). Display-only: the
+// report's total `pulses` stays the authoritative number for billing. Kept
+// to the last MAX_SAMPLES slots while reports are failing.
+const int MAX_SAMPLES = 60;
+unsigned int samples[MAX_SAMPLES];
+int sampleCount = 0;
+unsigned long lastSampleMs = 0;
+
+void takeSample() {
+  noInterrupts();
+  unsigned long pulses = secondPulseCount;
+  secondPulseCount = 0;
+  interrupts();
+
+  if (sampleCount == MAX_SAMPLES) {
+    memmove(samples, samples + 1, (MAX_SAMPLES - 1) * sizeof(samples[0]));
+    sampleCount--;
+  }
+  samples[sampleCount++] = pulses > 65535 ? 65535 : pulses;
 }
 
 unsigned long lastReportMs = 0;
@@ -106,6 +138,7 @@ void setup() {
   connectWiFi();
   discoverServer();
   lastReportMs = millis();
+  lastSampleMs = lastReportMs;
 }
 
 void loop() {
@@ -117,6 +150,15 @@ void loop() {
 
   unsigned long now = millis();
   unsigned long elapsed = now - lastReportMs; // unsigned subtraction: correct even across millis() rollover
+
+  if (now - lastSampleMs >= 1000) {
+    takeSample();
+    // Normally step exactly 1s so slots don't drift. If the loop was blocked
+    // longer (a slow report, a WiFi reconnect), that one slot just covers the
+    // longer span — restart the 1s rhythm from now rather than emitting a
+    // burst of empty catch-up slots.
+    lastSampleMs = (now - lastSampleMs >= 2000) ? now : lastSampleMs + 1000;
+  }
 
   if (elapsed >= REPORT_INTERVAL_MS) {
     // Snapshot and reset the counter with interrupts off just long enough
@@ -140,6 +182,7 @@ void loop() {
       Serial.println(F("Outage exceeded the carry-forward window — discarding undelivered pulses to avoid reporting a false flow spike."));
       pendingPulses = 0;
       pendingIntervalMs = 0;
+      sampleCount = 0;
     }
 
     unsigned long totalPulses = pulses + pendingPulses;
@@ -149,6 +192,7 @@ void loop() {
     if (reported) {
       pendingPulses = 0;
       pendingIntervalMs = 0;
+      sampleCount = 0;
     } else {
       pendingPulses = totalPulses;
       pendingIntervalMs = totalIntervalMs;
@@ -157,42 +201,36 @@ void loop() {
 }
 
 // ── WiFi ─────────────────────────────────────────────────────
-// WiFiManager remembers the network you connect it to (saved in the ESP's
-// flash) and reconnects to it automatically on every future boot — no SSID
-// or password in this code at all. If it can't find/connect to that saved
-// network (first boot ever, or you've moved the device), it opens its own
-// temporary WiFi hotspot named SETUP_AP_NAME so you can pick a nearby
-// network and enter its password from a phone or laptop. See the setup
-// guide for the step-by-step walkthrough of that first-time pairing.
+// Connects to the network set by WIFI_SSID / WIFI_PASSWORD in config.h.
+// Must be a 2.4GHz network — ESP8266/ESP32 can't see 5GHz-only ones.
 
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.printf("Connecting to WiFi \"%s\"", WIFI_SSID);
 
-  // Give the setup portal a time limit so an unattended device doesn't sit
-  // forever broadcasting its hotspot if nobody's there to configure it —
-  // it just reboots and tries the saved network again instead.
-  wifiManager.setConfigPortalTimeout(180); // 3 minutes
-
-  Serial.println(F("Connecting to the last saved WiFi network…"));
-  bool connected = wifiManager.autoConnect(SETUP_AP_NAME);
-
-  if (!connected) {
-    Serial.println(F("No network chosen within the setup window — restarting to try again."));
-    delay(1000);
-    ESP.restart();
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+    delay(400);
+    Serial.print(".");
   }
+  Serial.println();
 
-  Serial.print(F("WiFi connected, IP: "));
-  Serial.println(WiFi.localIP());
-  digitalWrite(LED_BUILTIN, LOW); // on = connected
-  wasWiFiConnected = true;
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print(F("WiFi connected, IP: "));
+    Serial.println(WiFi.localIP());
+    digitalWrite(LED_BUILTIN, LOW); // on = connected
+    wasWiFiConnected = true;
+  } else {
+    Serial.println(F("WiFi connect timed out — check WIFI_SSID/WIFI_PASSWORD in config.h. Will keep retrying."));
+  }
 }
 
 void ensureWiFiConnected() {
   if (WiFi.status() == WL_CONNECTED) {
     if (!wasWiFiConnected) {
-      // Back online after a drop — possibly on a different network, so the
-      // old server address can't be trusted. Rediscover right away.
+      // Back online after a drop — the server's address may have changed
+      // meanwhile, so the old one can't be trusted. Rediscover right away.
       Serial.print(F("WiFi reconnected, IP: "));
       Serial.println(WiFi.localIP());
       digitalWrite(LED_BUILTIN, LOW);
@@ -204,12 +242,12 @@ void ensureWiFiConnected() {
   }
   wasWiFiConnected = false;
   digitalWrite(LED_BUILTIN, HIGH); // off = not connected
-  Serial.println(F("WiFi dropped — reconnecting to the saved network…"));
-  // The saved network's credentials already live in flash, so a plain
-  // reconnect (no portal) is enough for a normal drop like the router
-  // rebooting. If the saved network is truly gone for good, re-running the
-  // full setup portal happens the next time the device is power-cycled.
-  WiFi.reconnect();
+  Serial.println(F("WiFi dropped — reconnecting…"));
+  connectWiFi();
+  if (WiFi.status() == WL_CONNECTED) {
+    serverUrl = "";
+    discoverServer();
+  }
 }
 
 // ── Server discovery ─────────────────────────────────────────
@@ -308,7 +346,12 @@ bool sendReading(unsigned long pulses, unsigned long intervalMs) {
   http.addHeader("X-Device-Key", DEVICE_KEY);
   http.setTimeout(8000);
 
-  String body = String("{\"pulses\":") + pulses + ",\"intervalMs\":" + intervalMs + "}";
+  String body = String("{\"pulses\":") + pulses + ",\"intervalMs\":" + intervalMs + ",\"samples\":[";
+  for (int i = 0; i < sampleCount; i++) {
+    if (i > 0) body += ',';
+    body += samples[i];
+  }
+  body += "]}";
   int status = http.POST(body);
   bool ok = status == 200;
 
@@ -318,6 +361,18 @@ bool sendReading(unsigned long pulses, unsigned long intervalMs) {
   } else {
     consecutiveFailures++;
     Serial.printf("Report failed (HTTP %d): %s — pulses carried into the next attempt.\n", status, http.getString().c_str());
+    if (status < 0) {
+      Serial.printf("  Connection error: %s\n", http.errorToString(status).c_str());
+      if (https) {
+        char sslError[100] = "";
+#if defined(ESP8266)
+        int sslCode = secureClient.getLastSSLError(sslError, sizeof(sslError));
+#else
+        int sslCode = secureClient.lastError(sslError, sizeof(sslError));
+#endif
+        Serial.printf("  TLS error %d: %s (free heap: %u bytes)\n", sslCode, sslError, ESP.getFreeHeap());
+      }
+    }
     Serial.println(F("Common causes: wrong/revoked DEVICE_KEY, or the server isn't reachable from this network."));
     // Negative status = connection-level failure (nothing answered at that
     // address), unlike a 4xx/5xx where the server was found but refused.

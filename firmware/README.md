@@ -102,7 +102,7 @@ noticeably more accurate billing than trusting the datasheet number.
 
 ## How this feeds real-time monitoring and billing
 
-- Every report (`REPORT_INTERVAL_MS`, default 10s) updates that
+- Every report (`REPORT_INTERVAL_MS`, default 15s) updates that
   household's live reading and flow rate — visible immediately on the
   admin dashboard via a live push (no refresh needed).
 - Sustained or spiking flow automatically raises **High Flow** / **Leak

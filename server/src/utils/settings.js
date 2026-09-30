@@ -5,16 +5,27 @@
 const { db } = require("../db/database");
 
 const ALERT_SETTINGS_DEFAULTS = {
+  // High Flow adapts to each household's own usage (flowDetection.js
+  // computeAdaptiveHighFlowLpm): highFlowLpm is the minimum threshold, and
+  // the one used until a household has enough history to learn from.
   highFlowLpm: 15, // a single reading at/above this = a wide-open tap or burst
+  highFlowLearnDays: 14, // learn from this many days of the household's readings
+  highFlowLearnMultiplier: 1.5, // threshold = household's typical peak flow × this
+  highFlowMinSamples: 20, // flowing readings needed before learning kicks in (~5 min of use at 15s reports)
+  highFlowMaxLpm: 40, // learning never raises the threshold above this
+  // Anything faster than this can't be real water through a household sensor
+  // (a YF-S201 tops out around 30 L/min) — it's electrical noise, e.g. a
+  // loose signal wire. Such readings are discarded instead of billed.
+  maxPlausibleFlowLpm: 100,
   leakFlowLpm: 2, // low but non-zero — the signature of a persistent drip/leak
   leakSustainedMinutes: 15, // ...if it's been continuous for this long, it's a leak
   leakMaxGapMinutes: 5, // a gap bigger than this breaks a leak streak
   highUsageRatio: 1.6, // a billing cycle at/above this × the household's average -> High Flow
   leakUsageRatio: 2.2, // ...at/above this × average -> Leak Detected instead
   // No readings for this long from a provisioned device -> No Sensor Data.
-  // The reference firmware (firmware/esp_water_meter) reports every ~10s by
-  // default, so 5 minutes is ~30 missed reports before flagging it — enough
-  // to shrug off a brief WiFi blip while still catching a dead device
+  // The reference firmware (firmware/esp_water_meter) reports every ~15s by
+  // default, so 5 minutes is ~20 missed reports before flagging it —
+  // enough to shrug off a brief WiFi blip while still catching a dead device
   // promptly instead of leaving it dark for the better part of an hour.
   deviceSilenceMinutes: 5,
   alertThrottleMinutes: 30, // don't re-alert the same type back-to-back

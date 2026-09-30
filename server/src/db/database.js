@@ -220,6 +220,9 @@ function initSchema() {
   }
 
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_households_device_key ON households(device_key) WHERE device_key IS NOT NULL");
+  // Real-time detection looks up a household's readings by time range (leak
+  // streak, learned High Flow threshold) on every device report.
+  db.exec("CREATE INDEX IF NOT EXISTS idx_readings_household_time ON readings(household_id, recorded_at)");
 
   const adminColumns = db.prepare("PRAGMA table_info(admin_accounts)").all().map((c) => c.name);
   if (!adminColumns.includes("reset_code_hash")) {

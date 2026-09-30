@@ -511,7 +511,18 @@ export default function WaterSystemPrototype() {
       setHouseholds((prev) =>
         prev.map((h) =>
           h.id === r.householdId
-            ? { ...h, currCm3: r.cm3, lastFlow: r.flowRate, flowType: r.flowType, lastReadingAt: r.recordedAt, deviceLastSeen: r.recordedAt }
+            ? {
+                ...h,
+                currCm3: r.cm3,
+                lastFlow: r.flowRate,
+                flowType: r.flowType,
+                lastReadingAt: r.recordedAt,
+                deviceLastSeen: r.recordedAt,
+                // Rolling last 60 one-second slots (liters each), for the
+                // per-second usage chart. Only lives in the browser —
+                // starts empty when the page loads.
+                perSecondLiters: [...(h.perSecondLiters || []), ...(r.perSecondLiters || [])].slice(-60),
+              }
             : h
         )
       );

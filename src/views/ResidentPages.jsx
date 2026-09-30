@@ -8,6 +8,7 @@ import { ConsumptionStatusBanner } from "../components/ConsumptionStatusBanner";
 import { GoogleSignInButton } from "../components/GoogleSignInButton";
 import { peso, MIN_BILL, formatDueDate, dueDateForPeriod, getConsumptionStatus, isOverdue, daysOverdue } from "../data";
 import { submitLeakReport, residentForgotPassword, fetchAnnouncements } from "../api";
+import { deviceStatus, DEVICE_STATUS_TICK_MS } from "../deviceStatus";
 
 // ─────────────────────────────────────────────────────────────
 // LOGIN — matches WaterSystemPrototype's handleResidentLogin contract:
@@ -736,24 +737,20 @@ function ResidentForgotPasswordScreen({ households, initialHouseholdId, onDone, 
 // ─────────────────────────────────────────────────────────────
 // DASHBOARD
 // ─────────────────────────────────────────────────────────────
-// Freshness-based device status, same thresholds the admin panel uses
-// (AdminPages.jsx's DeviceStatusBadge) so residents and admins see the same
-// "is my meter actually reporting right now" read on the same data.
-function deviceStatus(me) {
-  if (!me.deviceProvisioned) return { label: "Not connected", tone: "text-slate-400" };
-  if (!me.deviceLastSeen) return { label: "Awaiting first reading", tone: "text-amber-600" };
-  const ageMs = Date.now() - new Date(me.deviceLastSeen.replace(" ", "T") + "Z").getTime();
-  if (ageMs < 90_000) return { label: "● Online", tone: "text-emerald-600" };
-  if (ageMs < 10 * 60_000) return { label: "● Recently active", tone: "text-amber-600" };
-  return { label: "● Offline", tone: "text-red-600" };
-}
-
 // Live flow-sensor reading — updates on its own (no refresh needed) since
 // `me` comes from shared state that an open SSE connection keeps current
 // the instant the household's ESP reports in (see WaterSystemPrototype.jsx).
 function LiveUsageCard({ me }) {
+  // Re-render periodically so Online ages into Offline even when the meter
+  // goes quiet (which sends no event). Status thresholds: src/deviceStatus.js.
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceTick((n) => n + 1), DEVICE_STATUS_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+
   const status = deviceStatus(me);
-  const connected = me.deviceProvisioned && Boolean(me.deviceLastSeen);
+  const connected = status.online;
   const flowing = connected && (me.lastFlow || 0) > 0;
   const isHighFlow = connected && me.flowType === "High flow";
 
@@ -784,7 +781,9 @@ function LiveUsageCard({ me }) {
       </div>
       {!connected && (
         <p className="text-[11px] text-slate-400 mt-2.5">
-          {me.deviceProvisioned
+          {me.deviceProvisioned && me.deviceLastSeen
+            ? "Smart meter offline — live usage resumes when it reconnects. Your meter reading above is the last one received."
+            : me.deviceProvisioned
             ? "Smart meter registered — waiting for its first reading."
             : "No smart meter connected yet — your bill is based on manual readings until one's installed."}
         </p>

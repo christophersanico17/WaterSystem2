@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   computeLeakStreakMinutes,
+  computeAdaptiveHighFlowLpm,
   classifyRealTimeFlow,
   classifyConsumptionRatio,
 } = require("../src/utils/flowDetection");
@@ -13,6 +14,9 @@ const settings = {
   leakMaxGapMinutes: 5,
   highUsageRatio: 1.6,
   leakUsageRatio: 2.2,
+  highFlowLearnMultiplier: 1.5,
+  highFlowMinSamples: 30,
+  highFlowMaxLpm: 40,
 };
 
 // Readings are stored/read as SQLite's "YYYY-MM-DD HH:MM:SS" (UTC, no "Z").
@@ -83,6 +87,42 @@ test("classifyRealTimeFlow: low flow not yet sustained long enough raises nothin
 
 test("classifyRealTimeFlow: a sustained high-flow burst raises both", () => {
   assert.deepEqual(classifyRealTimeFlow(20, 20, settings), ["High Flow", "Leak Detected"]);
+});
+
+test("classifyRealTimeFlow: uses the household's own High Flow threshold when given one", () => {
+  assert.deepEqual(classifyRealTimeFlow(20, 0, settings, 25), []); // normal for this household
+  assert.deepEqual(classifyRealTimeFlow(26, 0, settings, 25), ["High Flow"]);
+});
+
+test("computeAdaptiveHighFlowLpm: not enough history -> the fixed minimum, not learned", () => {
+  const result = computeAdaptiveHighFlowLpm(Array(29).fill(30), settings);
+  assert.equal(result.thresholdLpm, 15);
+  assert.equal(result.learned, false);
+  assert.equal(result.samples, 29);
+});
+
+test("computeAdaptiveHighFlowLpm: learns 1.5x a heavy household's typical peak", () => {
+  // Normally flows around 18-20 L/min — would trip the fixed 15 L/min every time.
+  const rates = Array.from({ length: 100 }, (_, i) => 18 + (i % 3));
+  const result = computeAdaptiveHighFlowLpm(rates, settings);
+  assert.equal(result.learned, true);
+  assert.equal(result.typicalPeakLpm, 20);
+  assert.equal(result.thresholdLpm, 30);
+});
+
+test("computeAdaptiveHighFlowLpm: occasional spikes don't count as typical", () => {
+  const rates = [...Array(98).fill(10), 35, 35]; // 2% of readings spike
+  assert.equal(computeAdaptiveHighFlowLpm(rates, settings).typicalPeakLpm, 10);
+});
+
+test("computeAdaptiveHighFlowLpm: a light household never goes below the fixed minimum", () => {
+  const result = computeAdaptiveHighFlowLpm(Array(50).fill(4), settings);
+  assert.equal(result.learned, true);
+  assert.equal(result.thresholdLpm, 15);
+});
+
+test("computeAdaptiveHighFlowLpm: never learns above highFlowMaxLpm", () => {
+  assert.equal(computeAdaptiveHighFlowLpm(Array(50).fill(35), settings).thresholdLpm, 40);
 });
 
 test("classifyConsumptionRatio: no history to compare against -> null", () => {
