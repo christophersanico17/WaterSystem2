@@ -251,29 +251,17 @@ export function BillReplica({ me, paymentStamp, period }) {
       {/* Signatures */}
       <div className="px-5 py-4 flex justify-between text-[11px] text-slate-600">
         <div>
-          <div className="mb-6">Prepared By:</div>
-          <div className="border-t border-slate-800 pt-1 font-bold text-slate-800 underline">
+          <div>Prepared By:</div>
+          <div className="h-8" aria-hidden="true" />
+          <div className="font-bold text-slate-800">
             MERY ANN S. BOTOY
           </div>
           <div className="text-slate-500">CLERK II</div>
         </div>
         <div className="text-right">
-          <div className="mb-4">Checked and Approved by:</div>
-          <svg
-            width="80"
-            height="24"
-            viewBox="0 0 80 24"
-            className="ml-auto mb-0.5 opacity-60"
-          >
-            <path
-              d="M5,18 Q15,4 25,14 Q35,24 45,10 Q55,0 65,12 Q70,18 75,14"
-              stroke="#334155"
-              strokeWidth="1.5"
-              fill="none"
-              strokeLinecap="round"
-            />
-          </svg>
-          <div className="border-t border-slate-800 pt-1 font-bold text-slate-800 underline text-right">
+          <div>Checked and Approved by:</div>
+          <div className="h-8" aria-hidden="true" />
+          <div className="font-bold text-slate-800 text-right">
             HON. NATIVIDAD E. ELAGOR
           </div>
           <div className="text-slate-500">PUNONG BARANGAY</div>
