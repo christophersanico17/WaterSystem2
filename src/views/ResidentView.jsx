@@ -62,6 +62,7 @@ export function ResidentView({
   setActiveId,
   page,
   setPage,
+  myAlerts,
   residentAuthenticated,
   onResidentLogin,
   onResidentGoogleLogin,
@@ -69,6 +70,7 @@ export function ResidentView({
   residentLoginHouseholdId,
   onResidentLoginHouseholdSelect,
   startGcashPayment,
+  syncPendingPayment,
   onUpdateProfile,
   useApi,
 }) {
@@ -233,9 +235,9 @@ export function ResidentView({
       {/* ── Main content ── */}
       <div className="flex-1 bg-slate-50 flex flex-col min-w-0">
         <div className="p-4 sm:p-6 flex-1 lg:overflow-y-auto lg:max-h-screen">
-          {page === "dashboard"     && <ResidentDashboard me={me} setPage={setPage} />}
+          {page === "dashboard"     && <ResidentDashboard me={me} setPage={setPage} alerts={myAlerts} />}
           {page === "bills"         && <ResidentBills me={me} setPage={setPage} startGcashPayment={startGcashPayment} />}
-          {page === "payments"      && <ResidentPayments me={me} startGcashPayment={startGcashPayment} />}
+          {page === "payments"      && <ResidentPayments me={me} startGcashPayment={startGcashPayment} syncPendingPayment={syncPendingPayment} />}
           {page === "profile"       && <ResidentProfile me={me} onUpdateProfile={onUpdateProfile} />}
           {page === "consumption"   && <ResidentConsumption me={me} />}
           {page === "announcements" && <ResidentAnnouncements />}

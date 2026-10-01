@@ -7,7 +7,8 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "seed": "node src/db/seed.js",
-    "reset-db": "node -e \"for (const f of ['water_system.db','water_system.db-wal','water_system.db-shm']) require('fs').existsSync(f) && require('fs').unlinkSync(f)\" && npm run seed"
+    "reset-db": "node -e \"for (const f of ['water_system.db','water_system.db-wal','water_system.db-shm']) require('fs').existsSync(f) && require('fs').unlinkSync(f)\" && npm run seed",
+    "test": "node --test"
   },
   "keywords": [],
   "author": "",

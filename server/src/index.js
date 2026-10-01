@@ -10,6 +10,10 @@ const adminAuthRoutes = require("./routes/adminAuth");
 const dataRoutes = require("./routes/data");
 const announcementRoutes = require("./routes/announcements");
 const auditRoutes = require("./routes/audit");
+const webhookRoutes = require("./routes/webhooks");
+const deviceRoutes = require("./routes/devices");
+const eventRoutes = require("./routes/events");
+const settingsRoutes = require("./routes/settings");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -20,6 +24,12 @@ app.use(
     credentials: true,
   })
 );
+
+// Webhook routes need the raw request body to verify signatures, so they're
+// mounted with express.raw() ahead of the global express.json() parser below
+// (which would otherwise consume and re-serialize the body first).
+app.use("/api/webhooks", express.raw({ type: "application/json" }), webhookRoutes);
+
 app.use(express.json());
 
 app.get("/api/health", (req, res) => {
@@ -49,7 +59,13 @@ app.use("/api/resident", residentAuthRoutes);
 app.use("/api/admin", adminAuthRoutes);
 app.use("/api/announcements", announcementRoutes);
 app.use("/api/audit", auditRoutes);
+app.use("/api/events", eventRoutes);
+// deviceRoutes declares its own full paths (/devices/readings,
+// /households/:id/device...), so it's mounted at the bare /api root like
+// dataRoutes, not under an extra /api/devices prefix.
+app.use("/api", deviceRoutes);
 app.use("/api", dataRoutes);
+app.use("/api", settingsRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found." });
@@ -66,3 +82,9 @@ app.listen(PORT, () => {
   console.log(`  Listening on http://localhost:${PORT}`);
   console.log(`  Health check: http://localhost:${PORT}/api/health\n`);
 });
+
+// Periodic sweep for devices that have gone silent (dead battery, lost
+// Wi-Fi, etc.) — see routes/devices.js. Real-time flow/leak detection runs
+// inline as readings arrive, but a device that stops reporting entirely
+// never triggers that path, so it needs its own check on a timer.
+deviceRoutes.startDeviceSilenceMonitor();

@@ -60,8 +60,8 @@ function seed() {
   `);
 
   const insertReading = db.prepare(`
-    INSERT INTO readings (household_id, cm3, flow_rate, flow_type, recorded_at)
-    VALUES (@household_id, @cm3, @flow_rate, @flow_type, @recorded_at)
+    INSERT INTO readings (household_id, cm3, flow_rate, flow_type, recorded_at, source)
+    VALUES (@household_id, @cm3, @flow_rate, @flow_type, @recorded_at, 'mock')
   `);
 
   const insertAlert = db.prepare(`

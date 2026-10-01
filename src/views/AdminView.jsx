@@ -110,6 +110,9 @@ export function AdminView(props) {
     onResetResidentPassword,
     onGenerateBills,
     onAddHousehold,
+    onProvisionDevice,
+    onRevokeDevice,
+    onSetDeviceCalibration,
   } = props;
 
   const isOfficer = adminRole === "officer";
@@ -341,6 +344,9 @@ export function AdminView(props) {
               showToast={showToast}
               onResetPassword={onResetResidentPassword}
               onAddHousehold={onAddHousehold}
+              onProvisionDevice={onProvisionDevice}
+              onRevokeDevice={onRevokeDevice}
+              onSetDeviceCalibration={onSetDeviceCalibration}
             />
           )}
           {activePage === "records" && <RecordsPage households={households} showToast={showToast} />}

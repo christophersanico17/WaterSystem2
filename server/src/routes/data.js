@@ -2,6 +2,10 @@ const express = require("express");
 const { db } = require("../db/database");
 const { authMiddleware } = require("../utils/auth");
 const { recordAudit } = require("../utils/audit");
+const paymongo = require("../utils/paymongo");
+const alerts = require("../utils/alerts");
+const { getAlertSettings } = require("../utils/settings");
+const { classifyConsumptionRatio } = require("../utils/flowDetection");
 
 const router = express.Router();
 
@@ -27,6 +31,11 @@ router.get("/residents", (req, res) => {
       date_connected: h.date_connected,
       has_password: Boolean(account && account.password_hash),
       google_email: account ? account.google_email : null,
+      // Device status only — never the device_key itself, since this
+      // endpoint is public (used for the resident login dropdown too).
+      device_provisioned: Boolean(h.device_key),
+      device_last_seen: h.device_last_seen,
+      pulses_per_liter: h.pulses_per_liter,
     };
   });
   res.json(residents);
@@ -139,41 +148,26 @@ function dueDateForPeriod(period) {
   return `${dueYear}-${String(dueMonth + 1).padStart(2, "0")}-09`;
 }
 
-function nextAlertId() {
-  const rows = db.prepare("SELECT id FROM alerts").all();
-  let maxNum = 0;
-  for (const r of rows) {
-    const match = /^ALT-(\d+)$/.exec(r.id);
-    if (match) maxNum = Math.max(maxNum, parseInt(match[1], 10));
-  }
-  return `ALT-${maxNum + 1}`;
-}
-
 // Abnormal Consumption Detection: compares a newly billed cycle's consumption
 // against the household's own historical average (same signal as the resident-facing
 // getConsumptionStatus in src/data.js) and logs a real alert when it's anomalous,
-// instead of leaving the Alerts page fed only by static seed data.
-const HIGH_USAGE_RATIO = 1.6;
-const LEAK_USAGE_RATIO = 2.2;
-const insertAlert = db.prepare(
-  `INSERT INTO alerts (id, household_id, type, flow_rate, threshold, status) VALUES (?, ?, ?, ?, ?, 'Unresolved')`
-);
-
+// instead of leaving the Alerts page fed only by static seed data. Thresholds
+// are shared with the real-time detector in routes/devices.js via
+// utils/settings.js, editable from the admin Settings page.
 function detectAbnormalConsumption(householdId, consumption, priorBills) {
+  const settings = getAlertSettings();
   const pastUsages = priorBills.map((b) => b.curr_cm3 - b.prev_cm3);
   if (pastUsages.length === 0) return;
   const avg = pastUsages.reduce((s, v) => s + v, 0) / pastUsages.length;
-  if (avg <= 0) return;
-  const ratio = consumption / avg;
-  if (ratio < HIGH_USAGE_RATIO) return;
 
-  const type = ratio >= LEAK_USAGE_RATIO ? "Leak Detected" : "High Flow";
-  insertAlert.run(
-    nextAlertId(),
+  const type = classifyConsumptionRatio(consumption, avg, settings);
+  if (!type) return;
+
+  alerts.createAlert(
     householdId,
     type,
     `${consumption} CM3/cycle`,
-    `${Math.round(avg * HIGH_USAGE_RATIO)} CM3/cycle`
+    `${Math.round(avg * settings.highUsageRatio)} CM3/cycle`
   );
 }
 
@@ -281,26 +275,129 @@ router.post("/bills/:id/mark-unpaid", authMiddleware("admin"), (req, res) => {
   res.json({ success: true });
 });
 
-// POST /api/bills/:id/gcash/initiate — resident starts a GCash payment (mock: sets to Pending)
-router.post("/bills/:id/gcash/initiate", authMiddleware("resident"), (req, res) => {
+// POST /api/bills/:id/gcash/initiate — resident starts a GCash payment.
+// Creates a real PayMongo Checkout Session (test mode, unless live keys are
+// configured) and returns its hosted checkout_url. The bill is marked
+// "GCash Pending" immediately so the UI reflects the in-progress payment,
+// but it's only ever flipped to "Paid" once we've verified with PayMongo
+// (via /gcash/sync or the webhook) — never just because the client says so.
+router.post("/bills/:id/gcash/initiate", authMiddleware("resident"), async (req, res) => {
   const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
   if (!bill) return res.status(404).json({ error: "Bill not found." });
   if (bill.household_id !== req.user.householdId) {
     return res.status(403).json({ error: "You can only pay your own bill." });
   }
+  if (bill.payment_status === "Paid") {
+    return res.status(400).json({ error: "This bill is already paid." });
+  }
+  if (bill.total_due < 20) {
+    return res.status(400).json({ error: "PayMongo requires a minimum amount of ₱20.00." });
+  }
 
-  const ref = `GC${Date.now().toString().slice(-8)}`;
-  db.prepare(
-    `UPDATE bills SET payment_status = 'GCash Pending', payment_method = 'GCash', payment_ref = ?
-     WHERE id = ?`
-  ).run(ref, req.params.id);
+  const frontendOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 
-  // In a real integration this would return a PayMongo/GCash checkout_url.
-  // Mock mode: frontend just shows the pending state and waits for admin to confirm.
-  res.json({ success: true, ref, checkout_url: null });
+  try {
+    const session = await paymongo.createCheckoutSession({
+      amountPesos: bill.total_due,
+      description: `Water bill — ${bill.household_id} — ${bill.period}`,
+      referenceNumber: `BILL-${bill.id}`,
+      successUrl: `${frontendOrigin}/resident?paidHousehold=${encodeURIComponent(bill.household_id)}`,
+      cancelUrl: `${frontendOrigin}/resident?cancelledHousehold=${encodeURIComponent(bill.household_id)}`,
+      metadata: { billId: String(bill.id), householdId: bill.household_id, period: bill.period },
+    });
+
+    const sessionId = session?.data?.id;
+    const checkoutUrl = session?.data?.attributes?.checkout_url;
+    if (!sessionId || !checkoutUrl) {
+      throw new Error("PayMongo did not return a checkout session.");
+    }
+
+    db.prepare(
+      `UPDATE bills SET payment_status = 'GCash Pending', payment_method = 'GCash', payment_ref = ?
+       WHERE id = ?`
+    ).run(sessionId, req.params.id);
+
+    recordAudit(req, "bill.gcash_initiate", bill.household_id, `Started PayMongo checkout for ${bill.household_id} (${bill.period})`);
+    res.json({ success: true, ref: sessionId, checkout_url: checkoutUrl });
+  } catch (err) {
+    console.error("PayMongo checkout session error:", err.message, err.paymongo || "");
+    res.status(502).json({ error: "Could not start PayMongo checkout: " + err.message });
+  }
 });
 
-// POST /api/bills/:id/gcash/confirm  (admin only) — confirm a pending GCash payment
+// Shared by both sync routes below: re-checks one bill against PayMongo and
+// marks it Paid if confirmed. `bill` must already be access-checked by the
+// caller. Returns the { success, paid, status } payload to send as JSON.
+async function syncBillWithPaymongo(req, bill) {
+  if (bill.payment_status === "Paid") {
+    return { success: true, paid: true, status: "Paid" };
+  }
+  if (bill.payment_status !== "GCash Pending" || !bill.payment_ref) {
+    return { success: true, paid: false, status: bill.payment_status };
+  }
+
+  const session = await paymongo.retrieveCheckoutSession(bill.payment_ref);
+  const paid = paymongo.isCheckoutSessionPaid(session);
+  if (paid) {
+    db.prepare(
+      `UPDATE bills SET payment_status = 'Paid', payment_date = datetime('now') WHERE id = ?`
+    ).run(bill.id);
+    recordAudit(req, "bill.gcash_confirmed", bill.household_id, `PayMongo confirmed GCash payment for ${bill.household_id} (${bill.period})`);
+  }
+  return { success: true, paid, status: paid ? "Paid" : "GCash Pending" };
+}
+
+// POST /api/bills/:id/gcash/sync — re-check a pending payment against PayMongo
+// and mark the bill Paid if PayMongo confirms it. Callable by the resident
+// who owns the bill or by an admin. This is the primary confirmation path in
+// environments without a public webhook URL (e.g. local development).
+router.post("/bills/:id/gcash/sync", authMiddleware(), async (req, res) => {
+  const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
+  if (!bill) return res.status(404).json({ error: "Bill not found." });
+
+  const isOwner = req.user.role === "resident" && req.user.householdId === bill.household_id;
+  const isAdmin = req.user.role === "admin";
+  if (!isOwner && !isAdmin) {
+    return res.status(403).json({ error: "You do not have access to this bill." });
+  }
+
+  try {
+    res.json(await syncBillWithPaymongo(req, bill));
+  } catch (err) {
+    console.error("PayMongo sync error:", err.message, err.paymongo || "");
+    res.status(502).json({ error: "Could not check payment status with PayMongo: " + err.message });
+  }
+});
+
+// POST /api/households/:householdId/gcash/sync — same as above, but resolves
+// the household's current bill server-side. Used right after the PayMongo
+// checkout redirect, when the frontend only has the household id in the URL
+// and may not have the bill data loaded yet.
+router.post("/households/:householdId/gcash/sync", authMiddleware(), async (req, res) => {
+  const { householdId } = req.params;
+  const isOwner = req.user.role === "resident" && req.user.householdId === householdId;
+  const isAdmin = req.user.role === "admin";
+  if (!isOwner && !isAdmin) {
+    return res.status(403).json({ error: "You do not have access to this household." });
+  }
+
+  const bill = db
+    .prepare("SELECT * FROM bills WHERE household_id = ? ORDER BY id DESC LIMIT 1")
+    .get(householdId);
+  if (!bill) return res.json({ success: true, paid: false, status: "No bill" });
+
+  try {
+    res.json(await syncBillWithPaymongo(req, bill));
+  } catch (err) {
+    console.error("PayMongo sync error:", err.message, err.paymongo || "");
+    res.status(502).json({ error: "Could not check payment status with PayMongo: " + err.message });
+  }
+});
+
+// POST /api/bills/:id/gcash/confirm  (admin only) — manual override to confirm
+// a pending GCash payment without waiting on PayMongo (e.g. the resident paid
+// but a webhook was missed, or staff confirmed the payment by other means).
+// Prefer /gcash/sync where possible since it verifies with PayMongo directly.
 router.post("/bills/:id/gcash/confirm", authMiddleware("admin"), (req, res) => {
   const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
   if (!bill) return res.status(404).json({ error: "Bill not found." });
@@ -312,7 +409,7 @@ router.post("/bills/:id/gcash/confirm", authMiddleware("admin"), (req, res) => {
     `UPDATE bills SET payment_status = 'Paid', payment_date = datetime('now') WHERE id = ?`
   ).run(req.params.id);
 
-  recordAudit(req, "bill.gcash_confirm", bill.household_id, `Confirmed GCash payment for ${bill.household_id} (${bill.period})`);
+  recordAudit(req, "bill.gcash_confirm", bill.household_id, `Manually confirmed GCash payment for ${bill.household_id} (${bill.period})`);
   res.json({ success: true });
 });
 
@@ -366,8 +463,14 @@ router.get("/readings/latest/:meterNo", (req, res) => {
   res.json(reading);
 });
 
-// POST /api/readings — record a new sensor reading (would be called by IoT device/simulator)
-router.post("/readings", (req, res) => {
+// POST /api/readings  (admin only) — manually record/correct a reading, e.g.
+// to back-fill a period before a device was installed, or to note a manual
+// meter check. Real-time readings from actual hardware go through the
+// authenticated /api/devices/readings endpoint instead (routes/devices.js),
+// which is what keeps this one admin-gated: readings feed billing directly,
+// so letting anyone post arbitrary consumption data for any household would
+// be a real fraud vector once real money and real meters are involved.
+router.post("/readings", authMiddleware("admin", ["officer"]), (req, res) => {
   const { householdId, cm3, flowRate, flowType } = req.body || {};
 
   if (!householdId) {
@@ -394,9 +497,10 @@ router.post("/readings", (req, res) => {
   }
 
   db.prepare(
-    `INSERT INTO readings (household_id, cm3, flow_rate, flow_type) VALUES (?, ?, ?, ?)`
+    `INSERT INTO readings (household_id, cm3, flow_rate, flow_type, source) VALUES (?, ?, ?, ?, 'manual')`
   ).run(householdId, cm3, flowRate, flowType || "Normal");
 
+  recordAudit(req, "reading.manual_entry", householdId, `Manually recorded a ${cm3} CM³ reading for ${householdId}`);
   res.json({ success: true });
 });
 
@@ -412,6 +516,22 @@ router.get("/alerts", (req, res) => {
        ORDER BY a.created_at DESC`
     )
     .all();
+  res.json(rows);
+});
+
+// GET /api/alerts/mine  (resident) — this household's own leak/high-flow/
+// no-sensor-data alerts, so a resident can see the same real-time detection
+// admins see instead of only the per-cycle "High usage" banner on their
+// dashboard (which only updates once a bill is generated).
+router.get("/alerts/mine", authMiddleware("resident"), (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT a.*, h.name, h.standpost
+       FROM alerts a JOIN households h ON h.id = a.household_id
+       WHERE a.household_id = ?
+       ORDER BY a.created_at DESC LIMIT 20`
+    )
+    .all(req.user.householdId);
   res.json(rows);
 });
 

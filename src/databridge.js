@@ -87,6 +87,14 @@ export function residentToHousehold(resident, latestBill, reading, allBills = []
 
     lastFlow: reading ? reading.flow_rate : 0,
     flowType: reading ? reading.flow_type : "Normal",
+    lastReadingAt: reading ? reading.recorded_at : null,
+
+    // IoT device (Arduino/ESP + flow sensor) status — non-secret fields from
+    // GET /api/residents; the device key itself is only ever fetched/shown
+    // via the admin-only device endpoints (src/api.js fetchDeviceStatus etc).
+    deviceProvisioned: Boolean(resident.device_provisioned),
+    deviceLastSeen: resident.device_last_seen || null,
+    pulsesPerLiter: resident.pulses_per_liter || 450,
 
     bill_id: latestBill ? latestBill.id : null,
     history: history.length > 0 ? history : [{ period: "May 2026", prev: 0, curr: 0, amt: MIN_BILL }],

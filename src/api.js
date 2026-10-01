@@ -220,6 +220,26 @@ export async function confirmGcash(billId) {
   });
 }
 
+// Re-checks a pending GCash (PayMongo) payment and marks it Paid if PayMongo
+// confirms it. Callable by the resident who owns the bill or by an admin —
+// `auth` is picked per-caller since this module doesn't know which is signed in.
+export async function syncGcash(billId, auth) {
+  return request(`/bills/${billId}/gcash/sync`, {
+    method: "POST",
+    auth,
+  });
+}
+
+// Same as syncGcash, but resolves the household's current bill server-side —
+// used right after the PayMongo checkout redirect, before bill data has
+// necessarily been (re)loaded on this page.
+export async function syncGcashByHousehold(householdId, auth) {
+  return request(`/households/${encodeURIComponent(householdId)}/gcash/sync`, {
+    method: "POST",
+    auth,
+  });
+}
+
 export async function fetchPayments(householdId) {
   const qs = householdId ? `?householdId=${encodeURIComponent(householdId)}` : "";
   return request(`/payments${qs}`);
@@ -247,6 +267,25 @@ export async function resolveAlertApi(alertId) {
 
 export async function unresolveAlertApi(alertId) {
   return request(`/alerts/${alertId}/unresolve`, { method: "POST", auth: "admin" });
+}
+
+// This household's own alerts — same detection as the admin Alerts page,
+// scoped to the logged-in resident so they can see a real-time leak/high-flow
+// hit without waiting for the next billing cycle's usage banner.
+export async function fetchMyAlerts() {
+  return request("/alerts/mine", { auth: "resident" });
+}
+
+// ── Detection settings ───────────────────────────────────────
+// Real-time leak / abnormal-usage thresholds (routes/settings.js). Read on
+// the admin Settings page and by the detectors themselves server-side.
+
+export async function fetchAlertSettings() {
+  return request("/settings/alerts", { auth: "admin" });
+}
+
+export async function updateAlertSettingsApi(settings) {
+  return request("/settings/alerts", { method: "PUT", body: settings, auth: "admin" });
 }
 
 // ── Leak reports ─────────────────────────────────────────────
@@ -296,4 +335,47 @@ export async function deleteAnnouncement(id) {
 
 export async function fetchAuditLog(limit = 200) {
   return request(`/audit?limit=${limit}`, { auth: "admin" });
+}
+
+// ── IoT devices (Arduino/ESP flow-sensor meters) ────────────────
+// The device itself never talks to this file — it POSTs straight to
+// /api/devices/readings with an X-Device-Key header (see firmware/). These
+// are the admin-side provisioning/management calls only.
+
+export async function fetchDeviceStatus(householdId) {
+  return request(`/households/${encodeURIComponent(householdId)}/device`, { auth: "admin" });
+}
+
+// Returns { success, deviceKey } — deviceKey is shown once, same as most
+// API-key UIs. Calling this again rotates the key and invalidates the old one.
+export async function provisionDevice(householdId) {
+  return request(`/households/${encodeURIComponent(householdId)}/device/provision`, {
+    method: "POST",
+    auth: "admin",
+  });
+}
+
+export async function revokeDevice(householdId) {
+  return request(`/households/${encodeURIComponent(householdId)}/device/revoke`, {
+    method: "POST",
+    auth: "admin",
+  });
+}
+
+export async function setDeviceCalibration(householdId, pulsesPerLiter) {
+  return request(`/households/${encodeURIComponent(householdId)}/device/calibration`, {
+    method: "POST",
+    body: { pulsesPerLiter },
+    auth: "admin",
+  });
+}
+
+// Builds the URL for the admin's live Server-Sent Events stream (new
+// readings + alerts as devices report them). EventSource can't set an
+// Authorization header, so the token travels as a query param instead —
+// see server/src/routes/events.js for how it's verified there.
+export function liveEventsUrl() {
+  const token = getToken("admin");
+  if (!token) return null;
+  return `${API_BASE}/events/stream?token=${encodeURIComponent(token)}`;
 }
