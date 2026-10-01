@@ -387,6 +387,18 @@ export async function submitLeakReport({ location, description, severity, contac
   });
 }
 
+export async function fetchLeakReports() {
+  return request("/leak-reports", { auth: "admin" });
+}
+
+export async function resolveLeakReportApi(id) {
+  return request(`/leak-reports/${id}/resolve`, { method: "POST", auth: "admin" });
+}
+
+export async function unresolveLeakReportApi(id) {
+  return request(`/leak-reports/${id}/unresolve`, { method: "POST", auth: "admin" });
+}
+
 // ── Announcements ────────────────────────────────────────────
 // GET is public (residents read it); create/update/delete require an
 // admin token with the Water Officer role (enforced server-side).

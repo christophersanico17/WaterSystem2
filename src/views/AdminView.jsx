@@ -5,6 +5,7 @@ import {
   ConsumptionPage,
   BillingPage,
   AlertsPage,
+  LeakReportsPage,
   HouseholdsPage,
   RecordsPage,
   SettingsPage,
@@ -19,7 +20,7 @@ const NAV_ITEMS = [
   {
     id: "dashboard",
     label: "Dashboard",
-    icon: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6",
+    icon: "M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z",
   },
   {
     id: "consumption",
@@ -43,6 +44,12 @@ const NAV_ITEMS = [
     icon: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z",
   },
   {
+    id: "leakreports",
+    label: "Leak Reports",
+    officerOnly: true,
+    icon: "M12 3.75c-3.5 4-6 7.5-6 10.5a6 6 0 0012 0c0-3-2.5-6.5-6-10.5z",
+  },
+  {
     id: "households",
     label: "Households",
     officerOnly: true,
@@ -52,7 +59,7 @@ const NAV_ITEMS = [
     id: "records",
     label: "Records",
     officerOnly: true,
-    icon: "M9 17v-2a4 4 0 014-4h4m0 0l-3-3m3 3l-3 3M4 7h16M4 11h7m-7 4h7m-7 4h7",
+    icon: "M5 8h14M5 8a2 2 0 01-2-2V4a2 2 0 012-2h14a2 2 0 012 2v2a2 2 0 01-2 2M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4",
   },
   {
     id: "announcements",
@@ -100,6 +107,9 @@ export function AdminView(props) {
     setSelectedAlertId,
     resolveAlert,
     unresolveAlert,
+    leakReports = [],
+    resolveLeakReport,
+    reopenLeakReport,
     onResetResidentPassword,
     onConfirmPasswordReset,
     onGenerateBills,
@@ -115,7 +125,7 @@ export function AdminView(props) {
   const navItems = NAV_ITEMS.filter((item) => isOfficer || !item.officerOnly);
 
   const unresolvedCount = alerts.filter((a) => a.status === "Unresolved").length;
-  const pendingConfirmationCount = households.filter((h) => h.paymentStatus === "GCash Pending" || h.paymentStatus === "Cash Pending").length;
+  const gcashPendingCount = households.filter((h) => h.paymentStatus === "GCash Pending").length;
   const [collapsed, setCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [showMyAccount, setShowMyAccount] = useState(false);
@@ -223,7 +233,7 @@ export function AdminView(props) {
           {navItems.map((item) => {
             const isActive = activePage === item.id;
             const badgeCount =
-              item.id === "alerts" ? unresolvedCount : item.id === "billing" ? pendingConfirmationCount : 0;
+              item.id === "alerts" ? unresolvedCount : item.id === "billing" ? gcashPendingCount : 0;
             const badgeColor = item.id === "alerts" ? "text-rose-400" : "text-sky-300";
             return (
               <button
@@ -326,6 +336,13 @@ export function AdminView(props) {
               setSelectedAlertId={setSelectedAlertId}
               resolveAlert={resolveAlert}
               unresolveAlert={unresolveAlert}
+            />
+          )}
+          {activePage === "leakreports" && (
+            <LeakReportsPage
+              leakReports={leakReports}
+              resolveLeakReport={resolveLeakReport}
+              reopenLeakReport={reopenLeakReport}
             />
           )}
           {activePage === "households" && (

@@ -874,6 +874,167 @@ export function AlertsPage({ alerts, filter, setFilter, selectedAlertId, setSele
   );
 }
 
+export function LeakReportsPage({ leakReports, resolveLeakReport, reopenLeakReport }) {
+  const [filter, setFilter] = useState("All");
+  const [viewId, setViewId] = useState(null);
+
+  const filters = ["All", "Open", "Resolved"];
+  const counts = {
+    All: leakReports.length,
+    Open: leakReports.filter((r) => r.status === "Open").length,
+    Resolved: leakReports.filter((r) => r.status === "Resolved").length,
+  };
+
+  const filtered = leakReports.filter((r) => filter === "All" || r.status === filter);
+  const viewed = viewId ? leakReports.find((r) => r.id === viewId) : null;
+
+  const severityColor = (s) =>
+    s === "major" ? "text-rose-600" : s === "moderate" ? "text-amber-600" : "text-slate-500";
+
+  return (
+    <>
+      <SectionHeader title="Resident Leak Reports" sub="Water leaks and pipe issues reported by residents" />
+
+      <div className="flex gap-1.5 mb-4 flex-wrap">
+        {filters.map((f) => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            className={`text-[11px] font-medium px-2.5 py-1 rounded-full border transition ${
+              filter === f ? "bg-[#1e3a5f] text-white border-[#1e3a5f]" : "bg-white text-slate-600 border-slate-300 hover:bg-slate-50"
+            }`}
+          >
+            {f} ({counts[f]})
+          </button>
+        ))}
+      </div>
+
+      <div className="flex gap-3 flex-wrap mb-4">
+        <StatCard label="Total reports" value={counts.All} accent="border-t-slate-300" />
+        <StatCard label="Open" value={counts.Open} tone="bad" accent="border-t-rose-400" />
+        <StatCard label="Resolved" value={counts.Resolved} tone="good" accent="border-t-emerald-400" />
+      </div>
+
+      <div className="card-hover bg-white rounded-lg border border-slate-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px] min-w-[720px]">
+            <thead>
+              <tr className="text-slate-400 border-b border-slate-100">
+                <th className="text-left px-3 py-2 font-medium">Report ID</th>
+                <th className="text-left px-3 py-2 font-medium">Household</th>
+                <th className="text-left px-3 py-2 font-medium">Resident name</th>
+                <th className="text-left px-3 py-2 font-medium">Location</th>
+                <th className="text-left px-3 py-2 font-medium">Severity</th>
+                <th className="text-center px-3 py-2 font-medium">Contact back</th>
+                <th className="text-right px-3 py-2 font-medium">Reported</th>
+                <th className="text-center px-3 py-2 font-medium">Status</th>
+                <th className="text-center px-3 py-2 font-medium">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((r, i) => (
+                <tr
+                  key={r.id}
+                  onClick={() => setViewId(r.id)}
+                  className={`cursor-pointer ${i % 2 ? "bg-slate-50" : "bg-white"} hover:bg-sky-50`}
+                >
+                  <td className="px-3 py-1.5 text-slate-500">{r.id}</td>
+                  <td className="px-3 py-1.5 font-medium text-slate-700">{r.householdId}</td>
+                  <td className="px-3 py-1.5 text-slate-600">{r.name}</td>
+                  <td className="px-3 py-1.5 text-slate-600">{r.location}</td>
+                  <td className={`px-3 py-1.5 capitalize ${severityColor(r.severity)}`}>{r.severity}</td>
+                  <td className="px-3 py-1.5 text-center text-slate-500">{r.contactBack ? "Yes" : "No"}</td>
+                  <td className="px-3 py-1.5 text-right text-slate-400">{r.time}</td>
+                  <td className="px-3 py-1.5 text-center">
+                    {r.status === "Open" ? <Badge tone="bad">Open</Badge> : <Badge tone="good">Resolved</Badge>}
+                  </td>
+                  <td className="px-3 py-1.5 text-center">
+                    {r.status === "Open" ? (
+                      <Btn variant="ghost" onClick={(e) => { e.stopPropagation(); resolveLeakReport(r.id); }}>
+                        Resolve
+                      </Btn>
+                    ) : (
+                      <Btn variant="ghostMuted" onClick={(e) => { e.stopPropagation(); reopenLeakReport(r.id); }}>
+                        Reopen
+                      </Btn>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {filtered.length === 0 && (
+                <tr><td colSpan={9} className="text-center text-slate-400 py-6 text-xs">No leak reports match this filter.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {viewed && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setViewId(null)}
+        >
+          <div
+            className="bg-white rounded-2xl w-[420px] max-w-full overflow-hidden shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-slate-100 flex items-start justify-between">
+              <div>
+                <div className="text-[10px] text-slate-400 font-semibold uppercase tracking-wide">Leak report</div>
+                <div className="font-bold text-slate-800 text-lg">{viewed.id}</div>
+              </div>
+              <button onClick={() => setViewId(null)} className="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+            </div>
+
+            <div className="p-5">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <div className="font-semibold text-slate-800">{viewed.name}</div>
+                  <div className="text-xs text-slate-500">{viewed.householdId} · Standpost #{viewed.standpost}</div>
+                </div>
+                {viewed.status === "Open" ? <Badge tone="bad">Open</Badge> : <Badge tone="good">Resolved</Badge>}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-[13px] mb-3">
+                <div className="bg-slate-50 rounded-lg px-3 py-2">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Location</div>
+                  <div className="font-semibold text-slate-700">{viewed.location}</div>
+                </div>
+                <div className="bg-slate-50 rounded-lg px-3 py-2">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Severity</div>
+                  <div className={`font-semibold capitalize ${severityColor(viewed.severity)}`}>{viewed.severity}</div>
+                </div>
+                <div className="bg-slate-50 rounded-lg px-3 py-2">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Reported</div>
+                  <div className="font-semibold text-slate-700">{viewed.time}</div>
+                </div>
+                <div className="bg-slate-50 rounded-lg px-3 py-2">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Contact back requested</div>
+                  <div className="font-semibold text-slate-700">{viewed.contactBack ? "Yes" : "No"}</div>
+                </div>
+              </div>
+
+              <div className="bg-slate-50 rounded-lg px-3 py-2 text-[13px] mb-4">
+                <div className="text-[10px] text-slate-400 uppercase tracking-wide mb-1">Description</div>
+                <div className="text-slate-700">{viewed.description}</div>
+              </div>
+
+              <div className="flex gap-2 justify-end">
+                <Btn onClick={() => setViewId(null)}>Close</Btn>
+                {viewed.status === "Open" ? (
+                  <Btn variant="primary" onClick={() => { setViewId(null); resolveLeakReport(viewed.id); }}>Mark as Resolved</Btn>
+                ) : (
+                  <Btn variant="primary" onClick={() => { setViewId(null); reopenLeakReport(viewed.id); }}>Reopen</Btn>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // Freshness-based status for a household's flow-sensor device (thresholds
 // in src/deviceStatus.js, shared with the resident view).
 function DeviceStatusBadge({ household }) {
