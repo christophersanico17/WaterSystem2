@@ -652,6 +652,8 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
                             id: household.id,
                             name: household.name,
                             amount: household.totalDue,
+                            residentReference: household.paymentReference,
+                            mode: "automatic",
                           });
                         }}
                       >
@@ -723,6 +725,12 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
                 <span>Amount</span>
                 <span className="font-semibold text-slate-800">{peso(verifyGcash.amount)}</span>
               </div>
+              {verifyGcash.residentReference && (
+                <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
+                  <div className="text-xs font-semibold text-blue-600 mb-1">Resident's submitted reference</div>
+                  <div className="text-sm font-mono text-slate-800 break-all">{verifyGcash.residentReference}</div>
+                </div>
+              )}
               <label className="block">
                 <span className="block text-xs font-semibold text-slate-500 mb-1">Reference from GCash transaction record</span>
                 <input
