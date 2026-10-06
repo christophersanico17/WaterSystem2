@@ -18,14 +18,27 @@ export function GcashModal({ household, step, onConfirm, onClose }) {
     }
   }
 
-  function submitReference(event) {
+  async function submitReference(event) {
     event.preventDefault();
     // Require at least reference OR receipt
     if (!paymentReference.trim() && !receiptFile) {
       alert("Please enter a reference number or upload a receipt photo.");
       return;
     }
-    onConfirm({ reference: paymentReference.trim(), receipt: receiptFile });
+
+    let receiptImageBase64 = null;
+    if (receiptFile) {
+      receiptImageBase64 = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target?.result);
+        reader.readAsDataURL(receiptFile);
+      });
+    }
+
+    onConfirm({
+      reference: paymentReference.trim(),
+      receiptImage: receiptImageBase64
+    });
   }
 
   return (

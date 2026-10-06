@@ -284,10 +284,10 @@ export async function initiateGcash(billId) {
   });
 }
 
-export async function submitGcashReference(billId, reference) {
+export async function submitGcashReference(billId, reference, receiptImage) {
   return request(`/bills/${billId}/gcash/reference`, {
     method: "POST",
-    body: { reference },
+    body: { reference, receiptImage },
     auth: "resident",
   });
 }
@@ -296,6 +296,14 @@ export async function confirmGcash(billId, reference) {
   return request(`/bills/${billId}/gcash/confirm`, {
     method: "POST",
     body: reference ? { reference } : undefined,
+    auth: "admin",
+  });
+}
+
+export async function rejectGcash(billId, reason) {
+  return request(`/bills/${billId}/gcash/reject`, {
+    method: "POST",
+    body: { reason },
     auth: "admin",
   });
 }

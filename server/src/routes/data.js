@@ -420,8 +420,8 @@ router.post("/bills/:id/gcash/initiate", authMiddleware("resident"), async (req,
   }
 });
 
-// POST /api/bills/:id/gcash/reference — resident submits the GCash receipt
-// reference after paying through the displayed QR. An admin verifies it.
+// POST /api/bills/:id/gcash/reference — resident submits GCash payment proof
+// (reference, receipt image, or both). An admin verifies it.
 router.post("/bills/:id/gcash/reference", authMiddleware("resident"), (req, res) => {
   const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
   if (!bill) return res.status(404).json({ error: "Bill not found." });
@@ -433,16 +433,29 @@ router.post("/bills/:id/gcash/reference", authMiddleware("resident"), (req, res)
   }
 
   const reference = typeof req.body?.reference === "string" ? req.body.reference.trim() : "";
-  if (!/^[0-9]{1,80}$/.test(reference)) {
-    return res.status(400).json({ error: "Enter a numeric GCash payment reference (up to 80 digits)." });
+  const receiptImage = typeof req.body?.receiptImage === "string" ? req.body.receiptImage : null;
+
+  // Require at least reference or receipt
+  if (!reference && !receiptImage) {
+    return res.status(400).json({ error: "Submit a GCash reference, receipt image, or both." });
+  }
+
+  // Validate reference if provided
+  if (reference && !/^[0-9]{1,80}$/.test(reference)) {
+    return res.status(400).json({ error: "GCash reference must be numeric (up to 80 digits)." });
+  }
+
+  // Validate receipt image if provided (base64 data URL)
+  if (receiptImage && !receiptImage.startsWith("data:image/")) {
+    return res.status(400).json({ error: "Receipt must be a valid image." });
   }
 
   db.prepare(
-    `UPDATE bills SET payment_status = 'GCash Pending', payment_method = 'GCash', payment_ref = ?
+    `UPDATE bills SET payment_status = 'GCash Pending', payment_method = 'GCash', payment_ref = ?, receipt_image = ?
      WHERE id = ?`
-  ).run(`${QR_PAYMENT_REF_PREFIX}${reference}`, req.params.id);
+  ).run(reference ? `${QR_PAYMENT_REF_PREFIX}${reference}` : null, receiptImage, req.params.id);
 
-  recordAudit(req, "bill.gcash_reference_submitted", bill.household_id, `Submitted a GCash QR payment reference for ${bill.household_id} (${bill.period})`);
+  recordAudit(req, "bill.gcash_reference_submitted", bill.household_id, `Submitted GCash payment proof for ${bill.household_id} (${bill.period})`);
   res.json({ success: true, status: "GCash Pending" });
 });
 
@@ -546,6 +559,27 @@ router.post("/bills/:id/gcash/confirm", authMiddleware("admin"), (req, res) => {
 
   recordAudit(req, "bill.gcash_confirm", bill.household_id, `Manually confirmed GCash payment for ${bill.household_id} (${bill.period})`);
   res.json({ success: true });
+});
+
+// POST /api/bills/:id/gcash/reject  (admin only) — reject a pending GCash payment
+// Reset it to Unpaid so the resident can try again
+router.post("/bills/:id/gcash/reject", authMiddleware("admin"), (req, res) => {
+  const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
+  if (!bill) return res.status(404).json({ error: "Bill not found." });
+  if (bill.payment_status !== "GCash Pending") {
+    return res.status(400).json({ error: "This bill is not pending GCash confirmation." });
+  }
+
+  const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "Payment rejected by admin";
+
+  db.prepare(
+    `UPDATE bills SET payment_status = 'Unpaid', payment_method = NULL, payment_ref = NULL,
+                      receipt_image = NULL, payment_rejection_reason = ?, payment_date = NULL
+     WHERE id = ?`
+  ).run(reason, req.params.id);
+
+  recordAudit(req, "bill.gcash_reject", bill.household_id, `Rejected pending GCash payment for ${bill.household_id} (${bill.period}): ${reason}`);
+  res.json({ success: true, message: `Payment rejected. Resident notified: "${reason}"` });
 });
 
 // POST /api/bills/:id/cash/initiate — resident declares intent to pay in

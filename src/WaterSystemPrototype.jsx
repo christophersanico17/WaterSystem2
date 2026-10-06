@@ -8,7 +8,7 @@ import {
   getToken, adminLogin, adminLogout,
   fetchResidents, fetchBills, fetchBillingPeriods, generateBills,
   fetchReadings, fetchLatestReading,
-  submitGcashReference, recordCash, recordUnpaid, confirmGcash, confirmCash, syncGcashByHousehold, fetchPayments,
+  submitGcashReference, recordCash, recordUnpaid, confirmGcash, confirmCash, syncGcashByHousehold, fetchPayments, rejectGcash,
   residentLogin, residentGoogleLogin, residentLogout,
   updateResidentProfile, resetResidentPassword, confirmResidentPasswordReset, resolveAlertApi, unresolveAlertApi,
   createHousehold, fetchAlerts, fetchMyAlerts,
@@ -827,13 +827,13 @@ export default function WaterSystemPrototype() {
     setPaymentStep("confirm");
   }
 
-  async function confirmGcashPayment(reference) {
+  async function confirmGcashPayment({ reference, receiptImage }) {
     setPaymentStep("processing");
     try {
       const household = households.find((h) => h.id === paymentModal);
       if (USE_API && !household?.bill_id) throw new Error("No bill found.");
       if (USE_API) {
-        await submitGcashReference(household.bill_id, reference);
+        await submitGcashReference(household.bill_id, reference, receiptImage);
         await loadFromAPI(true);
       } else {
         const paymentReference = reference.trim();
@@ -846,10 +846,10 @@ export default function WaterSystemPrototype() {
         );
       }
       setPaymentStep("gcash-pending");
-      showToast("GCash reference submitted for admin verification.", "info");
+      showToast("GCash payment proof submitted for admin verification.", "info");
     } catch (err) {
       setPaymentStep("confirm");
-      showToast("Could not submit GCash reference: " + err.message, "warn");
+      showToast("Could not submit payment proof: " + err.message, "warn");
     }
   }
 
