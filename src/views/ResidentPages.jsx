@@ -47,6 +47,7 @@ export function LoginScreen({
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -135,6 +136,7 @@ export function LoginScreen({
         email: isNewPassword ? email : undefined,
         firstName: isNewPassword ? firstName : undefined,
         lastName: isNewPassword ? lastName : undefined,
+        rememberMe,
       });
       if (!result || !result.success) {
         // The backend always checks the real account state, regardless of
@@ -150,6 +152,9 @@ export function LoginScreen({
         } else {
           setError((result && result.message) || "Login failed. Please try again.");
         }
+      }
+      if (rememberMe && result && result.success) {
+        localStorage.setItem("residentRememberMe", "true");
       }
     } catch (err) {
       setError(err.message || "Something went wrong. Please try again.");
@@ -424,15 +429,29 @@ export function LoginScreen({
                 </div>
               )}
               {!isNewPassword && (
-                <div className="mt-2 text-right">
-                  <button
-                    type="button"
-                    onClick={() => { setError(""); setInfo(""); setMode("forgot"); }}
-                    className="text-xs sm:text-[13px] text-sky-600 hover:text-sky-800 font-medium"
-                  >
-                    Forgot password?
-                  </button>
-                </div>
+                <>
+                  <div className="mt-3 mb-3 flex items-center gap-2">
+                    <input
+                      id="resident-remember-me"
+                      type="checkbox"
+                      checked={rememberMe}
+                      onChange={(e) => setRememberMe(e.target.checked)}
+                      className="w-4 h-4 rounded border-slate-300 text-[#1e3a5f] focus:ring-[#1e3a5f] cursor-pointer"
+                    />
+                    <label htmlFor="resident-remember-me" className="text-xs sm:text-[13px] text-slate-600 cursor-pointer">
+                      Remember me
+                    </label>
+                  </div>
+                  <div className="text-right">
+                    <button
+                      type="button"
+                      onClick={() => { setError(""); setInfo(""); setMode("forgot"); }}
+                      className="text-xs sm:text-[13px] text-sky-600 hover:text-sky-800 font-medium"
+                    >
+                      Forgot password?
+                    </button>
+                  </div>
+                </>
               )}
             </div>
 

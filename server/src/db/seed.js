@@ -121,38 +121,44 @@ function seed() {
         });
       });
 
-      // Current period (May 2026) — randomized like the original mock
-      const prev = 10 + i * 4 + Math.floor(Math.random() * 6);
-      const current = prev + 8 + Math.floor(Math.random() * 22);
-      const consumption = current - prev;
-      const amount = computeBill(consumption);
-      const prevBalance = MIN_BILL === MIN_BILL ? 0 : 0; // first cycle has no carry-over
-      const paymentStatus = Math.random() > 0.5 ? "Paid" : "Unpaid";
-      const paymentMethod = paymentStatus === "Paid" ? (Math.random() > 0.5 ? "GCash" : "Offline") : null;
+      // Current period (May 2026) — only for HH-001 which has Arduino data
+      // Other households wait until they have actual meter readings
+      if (i === 0) {
+        const prev = 10 + i * 4 + Math.floor(Math.random() * 6);
+        const current = prev + 8 + Math.floor(Math.random() * 22);
+        const consumption = current - prev;
+        const amount = computeBill(consumption);
+        const prevBalance = MIN_BILL === MIN_BILL ? 0 : 0; // first cycle has no carry-over
+        const paymentStatus = Math.random() > 0.5 ? "Paid" : "Unpaid";
+        const paymentMethod = paymentStatus === "Paid" ? (Math.random() > 0.5 ? "GCash" : "Offline") : null;
 
-      insertBill.run({
-        household_id: h.id,
-        period: "May 2026",
-        prev_cm3: prev,
-        curr_cm3: current,
-        amount,
-        prev_balance: prevBalance,
-        total_due: +(amount + prevBalance).toFixed(2),
-        payment_status: paymentStatus,
-        payment_method: paymentMethod,
-        payment_ref: paymentMethod === "GCash" ? `GC${20000000 + i}` : null,
-        payment_date: paymentStatus === "Paid" ? dateStamp(2) : null,
-        due_date: dateStamp(-10), // 10 days from now
-      });
+        insertBill.run({
+          household_id: h.id,
+          period: "May 2026",
+          prev_cm3: prev,
+          curr_cm3: current,
+          amount,
+          prev_balance: prevBalance,
+          total_due: +(amount + prevBalance).toFixed(2),
+          payment_status: paymentStatus,
+          payment_method: paymentMethod,
+          payment_ref: paymentMethod === "GCash" ? `GC${20000000 + i}` : null,
+          payment_date: paymentStatus === "Paid" ? dateStamp(2) : null,
+          due_date: dateStamp(-10), // 10 days from now
+        });
+      }
 
-      // Latest sensor reading
-      insertReading.run({
-        household_id: h.id,
-        cm3: current,
-        flow_rate: 2 + Math.floor(Math.random() * 5),
-        flow_type: "Normal",
-        recorded_at: sqliteNow(),
-      });
+      // Latest sensor reading — only for HH-001 which has an Arduino meter
+      if (i === 0) {
+        const current = 10 + i * 4 + Math.floor(Math.random() * 6) + 8 + Math.floor(Math.random() * 22);
+        insertReading.run({
+          household_id: h.id,
+          cm3: current,
+          flow_rate: 2 + Math.floor(Math.random() * 5),
+          flow_type: "Normal",
+          recorded_at: sqliteNow(),
+        });
+      }
     });
 
     // A few sample alerts, same pattern as buildInitialAlerts()

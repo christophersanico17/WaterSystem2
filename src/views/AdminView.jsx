@@ -538,6 +538,7 @@ function AdminLoginScreen({ onAdminLogin }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [info, setInfo] = useState("");
@@ -553,9 +554,12 @@ function AdminLoginScreen({ onAdminLogin }) {
 
     setSubmitting(true);
     try {
-      const result = await onAdminLogin({ email, password, firstName, lastName });
+      const result = await onAdminLogin({ email, password, firstName, lastName, rememberMe });
       if (!result || !result.success) {
         setError((result && result.message) || "Login failed. Please try again.");
+      }
+      if (rememberMe && result && result.success) {
+        localStorage.setItem("adminRememberMe", "true");
       }
     } catch (err) {
       setError(err.message || "Something went wrong. Please try again.");
@@ -680,7 +684,7 @@ function AdminLoginScreen({ onAdminLogin }) {
               </div>
 
               {/* Password */}
-              <div className="mb-1">
+              <div className="mb-3">
                 <label className="text-xs sm:text-[13px] font-semibold text-slate-600 block mb-1.5">
                   Password
                 </label>
@@ -716,6 +720,21 @@ function AdminLoginScreen({ onAdminLogin }) {
                   </button>
                 </div>
               </div>
+
+              {/* Remember Me */}
+              <div className="mb-4 flex items-center gap-2">
+                <input
+                  id="admin-remember-me"
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  className="w-4 h-4 rounded border-slate-300 text-[#1e3a5f] focus:ring-[#1e3a5f] cursor-pointer"
+                />
+                <label htmlFor="admin-remember-me" className="text-xs sm:text-[13px] text-slate-600 cursor-pointer">
+                  Remember me
+                </label>
+              </div>
+
               <div className="text-right mb-5">
                 <button
                   type="button"
