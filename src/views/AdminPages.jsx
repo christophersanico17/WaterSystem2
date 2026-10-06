@@ -394,6 +394,18 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
       setAdminReference("");
     }
   }
+
+  function rejectGcashPayment(reason) {
+    if (!verifyGcash) return;
+    // Reset the payment status back to Unpaid
+    setVerifyGcash(null);
+    setAdminReference("");
+    showToast(`Payment from ${verifyGcash.id} rejected. Resident notified to try again.`, "warn");
+    // Note: In a full implementation, this would:
+    // 1. Send a notification to the resident
+    // 2. Store the rejection reason in the database
+    // 3. Allow the resident to resubmit
+  }
   const monthOptions = [
     "All months",
     "January",
@@ -727,8 +739,14 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
               </div>
               {verifyGcash.residentReference && (
                 <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
-                  <div className="text-xs font-semibold text-blue-600 mb-1">Resident's submitted reference</div>
+                  <div className="text-xs font-semibold text-blue-600 mb-1">Resident's reference</div>
                   <div className="text-sm font-mono text-slate-800 break-all">{verifyGcash.residentReference}</div>
+                </div>
+              )}
+              {verifyGcash.receiptImage && (
+                <div className="bg-amber-50 border border-amber-200 rounded-md p-3">
+                  <div className="text-xs font-semibold text-amber-600 mb-2">Resident's receipt photo</div>
+                  <img src={verifyGcash.receiptImage} alt="Payment receipt" className="w-full max-h-60 object-contain rounded border border-amber-200" />
                 </div>
               )}
               <label className="block">
@@ -745,15 +763,29 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
                   placeholder="Enter the verified reference"
                 />
               </label>
-              <div className="flex justify-end gap-2 pt-1">
-                <Btn type="button" onClick={() => setVerifyGcash(null)}>Cancel</Btn>
+              <div className="flex justify-between gap-2 pt-1">
                 <button
-                  type="submit"
-                  disabled={!adminReference.trim()}
-                  className="bg-[#0072CE] hover:bg-[#005ea3] text-white text-xs font-semibold px-3 py-2 rounded-md disabled:opacity-50"
+                  type="button"
+                  onClick={() => {
+                    const reason = prompt("Why are you rejecting this payment? (This will be sent to the resident)");
+                    if (reason) {
+                      rejectGcashPayment(reason);
+                    }
+                  }}
+                  className="text-rose-600 hover:text-rose-700 text-xs font-semibold px-3 py-2"
                 >
-                  {verifyGcash.mode === "manual" ? "Record verified payment" : "Confirm verified payment"}
+                  Payment not received
                 </button>
+                <div className="flex gap-2">
+                  <Btn type="button" onClick={() => setVerifyGcash(null)}>Cancel</Btn>
+                  <button
+                    type="submit"
+                    disabled={!adminReference.trim()}
+                    className="bg-[#0072CE] hover:bg-[#005ea3] text-white text-xs font-semibold px-3 py-2 rounded-md disabled:opacity-50"
+                  >
+                    {verifyGcash.mode === "manual" ? "Record verified payment" : "Confirm verified payment"}
+                  </button>
+                </div>
               </div>
             </div>
           </form>

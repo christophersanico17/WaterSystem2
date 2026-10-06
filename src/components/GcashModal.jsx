@@ -20,6 +20,11 @@ export function GcashModal({ household, step, onConfirm, onClose }) {
 
   function submitReference(event) {
     event.preventDefault();
+    // Require at least reference OR receipt
+    if (!paymentReference.trim() && !receiptFile) {
+      alert("Please enter a reference number or upload a receipt photo.");
+      return;
+    }
     onConfirm({ reference: paymentReference.trim(), receipt: receiptFile });
   }
 
@@ -44,7 +49,7 @@ export function GcashModal({ household, step, onConfirm, onClose }) {
                 className="w-56 h-56 object-contain border border-slate-200 rounded-md my-4"
               />
               <div className="w-full text-xs text-slate-600 mb-3">
-                Scan the QR code and pay the exact amount above. Enter the payment reference shown on your receipt.
+                Scan the QR code and pay the exact amount above. Submit your payment proof by entering the reference number, uploading your receipt photo, or both.
               </div>
               <label htmlFor="gcash-payment-reference" className="w-full text-xs font-semibold text-slate-600 mb-1">
                 GCash reference number
@@ -88,10 +93,9 @@ export function GcashModal({ household, step, onConfirm, onClose }) {
               />
               <button
                 type="submit"
-                disabled={!paymentReference.trim()}
-                className="w-full mt-3 bg-[#0072CE] hover:bg-[#005ea3] text-white font-semibold text-sm py-2.5 rounded-md transition disabled:opacity-50"
+                className="w-full mt-3 bg-[#0072CE] hover:bg-[#005ea3] text-white font-semibold text-sm py-2.5 rounded-md transition"
               >
-                Submit reference for verification
+                Submit payment for verification
               </button>
             </form>
           )}
