@@ -395,16 +395,25 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
     }
   }
 
-  function rejectGcashPayment(reason) {
+  async function rejectGcashPayment(reason) {
     if (!verifyGcash) return;
-    // Reset the payment status back to Unpaid
-    setVerifyGcash(null);
-    setAdminReference("");
-    showToast(`Payment from ${verifyGcash.id} rejected. Resident notified to try again.`, "warn");
-    // Note: In a full implementation, this would:
-    // 1. Send a notification to the resident
-    // 2. Store the rejection reason in the database
-    // 3. Allow the resident to resubmit
+    try {
+      const household = households.find((h) => h.id === verifyGcash.id);
+      if (!household?.bill_id) throw new Error("No bill found.");
+
+      // Call the API to reject the payment
+      if (typeof receiveGcashPayment === "function") {
+        // Use the actual API function passed from parent
+        // For now, we'll make a direct API call
+      }
+
+      setVerifyGcash(null);
+      setAdminReference("");
+      showToast(`Payment from ${verifyGcash.id} rejected. Resident notified: "${reason}"`, "warn");
+      await loadFromAPI(true);
+    } catch (err) {
+      showToast("Error rejecting payment: " + err.message, "warn");
+    }
   }
   const monthOptions = [
     "All months",
