@@ -9,16 +9,7 @@ const { getAlertSettings } = require("../utils/settings");
 const { classifyConsumptionRatio } = require("../utils/flowDetection");
 
 const router = express.Router();
-
-// ───────────────────────────────────────────────────────────
-// Time sync endpoint for ESP32 devices
-// ───────────────────────────────────────────────────────────
-// GET /api/time — returns current server time (UTC unix timestamp)
-// Used by ESP32 devices to sync their RTC clocks for accurate reading timestamps
-router.get("/time", (req, res) => {
-  const timestamp = Math.floor(Date.now() / 1000);
-  res.json({ timestamp });
-});
+const QR_PAYMENT_REF_PREFIX = "QR:";
 
 // ───────────────────────────────────────────────────────────
 // Residents / households
@@ -208,31 +199,15 @@ router.post("/residents/:id/reset-password", authMiddleware("admin", ["officer"]
 });
 
 // ───────────────────────────────────────────────────────────
-// Bills — tiered pricing based on consumption
+// Bills
 // ───────────────────────────────────────────────────────────
 
-const BILLING_TIERS = [
-  { maxCm3: 50, ratePeso: 18 },    // 0-50 CM³: ₱18/CM³ (basic/essential)
-  { maxCm3: 100, ratePeso: 22 },   // 51-100 CM³: ₱22/CM³ (normal)
-  { maxCm3: Infinity, ratePeso: 25 } // 100+ CM³: ₱25/CM³ (excessive)
-];
-const MIN_BILL = 150;
+const RATE_PER_CM3 = 20;
+const MIN_BILL = 200;
 const MONTH_SHORT_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function computeBillAmount(consumptionCm3) {
-  let amount = 0;
-  let remaining = consumptionCm3;
-  let prevMax = 0;
-
-  for (const tier of BILLING_TIERS) {
-    if (remaining <= 0) break;
-    const tierConsumption = Math.min(remaining, tier.maxCm3 - prevMax);
-    amount += tierConsumption * tier.ratePeso;
-    remaining -= tierConsumption;
-    prevMax = tier.maxCm3;
-  }
-
-  return +Math.max(amount, MIN_BILL).toFixed(2);
+  return +Math.max(consumptionCm3 * RATE_PER_CM3, MIN_BILL).toFixed(2);
 }
 
 // Built as a plain "YYYY-MM-DD" string with no Date/toISOString round-trip —
@@ -276,9 +251,9 @@ function detectAbnormalConsumption(householdId, consumption, priorBills) {
 
 // POST /api/bills/generate  (admin only) — generate one bill per household for
 // a given period, from each household's latest reading vs. their latest bill.
-// Deletes and regenerates to ensure correct tiered pricing is applied.
+// Households that already have a bill for this period are skipped (idempotent).
 router.post("/bills/generate", authMiddleware("admin", ["officer"]), (req, res) => {
-  const { period, force } = req.body || {};
+  const { period } = req.body || {};
   if (!period || !dueDateForPeriod(period)) {
     return res.status(400).json({ error: "A valid period (e.g. 'Jun 2026') is required." });
   }
@@ -290,22 +265,21 @@ router.post("/bills/generate", authMiddleware("admin", ["officer"]), (req, res) 
   );
 
   let created = 0;
-  let updated = 0;
+  let skipped = 0;
 
   const tx = db.transaction(() => {
-    // If force=true, delete existing bills for this period and regenerate with new pricing
-    if (force) {
-      db.prepare("DELETE FROM bills WHERE period = ?").run(period);
-    }
-
     for (const h of households) {
       const existing = db
-        .prepare("SELECT id, amount FROM bills WHERE household_id = ? AND period = ?")
+        .prepare("SELECT id FROM bills WHERE household_id = ? AND period = ?")
         .get(h.id, period);
+      if (existing) {
+        skipped++;
+        continue;
+      }
 
       const latestBill = db
-        .prepare("SELECT * FROM bills WHERE household_id = ? AND period != ? ORDER BY id DESC LIMIT 1")
-        .get(h.id, period);
+        .prepare("SELECT * FROM bills WHERE household_id = ? ORDER BY id DESC LIMIT 1")
+        .get(h.id);
       const latestReading = db
         .prepare("SELECT * FROM readings WHERE household_id = ? ORDER BY recorded_at DESC LIMIT 1")
         .get(h.id);
@@ -317,28 +291,19 @@ router.post("/bills/generate", authMiddleware("admin", ["officer"]), (req, res) 
       const prevBalance = latestBill && latestBill.payment_status !== "Paid" ? latestBill.total_due : 0;
       const totalDue = +(amount + prevBalance).toFixed(2);
 
-      if (existing) {
-        // Update with new tiered pricing calculation
-        if (existing.amount !== amount) {
-          db.prepare("UPDATE bills SET amount = ?, total_due = ? WHERE household_id = ? AND period = ?")
-            .run(amount, totalDue, h.id, period);
-          updated++;
-        }
-      } else {
-        const priorBills = db
-          .prepare("SELECT prev_cm3, curr_cm3 FROM bills WHERE household_id = ? ORDER BY id")
-          .all(h.id);
+      const priorBills = db
+        .prepare("SELECT prev_cm3, curr_cm3 FROM bills WHERE household_id = ? ORDER BY id")
+        .all(h.id);
 
-        insertBill.run(h.id, period, prevCm3, currCm3, amount, prevBalance, totalDue, dueDateForPeriod(period));
-        detectAbnormalConsumption(h.id, consumption, priorBills);
-        created++;
-      }
+      insertBill.run(h.id, period, prevCm3, currCm3, amount, prevBalance, totalDue, dueDateForPeriod(period));
+      detectAbnormalConsumption(h.id, consumption, priorBills);
+      created++;
     }
   });
   tx();
 
-  recordAudit(req, "bill.generate", period, `Generated ${created} new bill(s) and updated ${updated} existing bill(s) for ${period} with tiered pricing`);
-  res.json({ success: true, period, created, updated, message: "Bills regenerated with tiered pricing" });
+  recordAudit(req, "bill.generate", period, `Generated ${created} bill(s) for ${period}${skipped ? `, skipped ${skipped} already billed` : ""}`);
+  res.json({ success: true, period, created, skipped });
 });
 
 // GET /api/bills — admin: all bills, optionally filtered by ?householdId=.
@@ -366,89 +331,26 @@ router.get("/bills/periods", (req, res) => {
   res.json(rows);
 });
 
-// POST /api/bills/fix-prev-readings (admin only) — fix prev_cm3 values and meter readings
-router.post("/bills/fix-prev-readings", authMiddleware("admin", ["officer"]), (req, res) => {
-  let fixedBills = 0;
-  let fixedReadings = 0;
-
-  const tx = db.transaction(() => {
-    const households = db.prepare("SELECT id FROM households").all();
-
-    for (const h of households) {
-      // Fix bills: set prev_cm3 based on previous bill's curr_cm3
-      const bills = db.prepare("SELECT id, curr_cm3, prev_cm3 FROM bills WHERE household_id = ? ORDER BY id").all(h.id);
-      for (let i = 0; i < bills.length; i++) {
-        const bill = bills[i];
-        const expectedPrevCm3 = i === 0 ? 0 : bills[i - 1].curr_cm3;
-        if (bill.prev_cm3 !== expectedPrevCm3) {
-          db.prepare("UPDATE bills SET prev_cm3 = ? WHERE id = ?").run(expectedPrevCm3, bill.id);
-          fixedBills++;
-        }
-      }
-
-      // Fix readings: ensure latest reading >= latest bill's curr_cm3
-      const latestBill = db.prepare("SELECT curr_cm3 FROM bills WHERE household_id = ? ORDER BY id DESC LIMIT 1").get(h.id);
-      const latestReading = db.prepare("SELECT id, cm3 FROM readings WHERE household_id = ? ORDER BY recorded_at DESC LIMIT 1").get(h.id);
-
-      if (latestBill && latestReading) {
-        if (latestReading.cm3 < latestBill.curr_cm3) {
-          const newCm3 = latestBill.curr_cm3 + 10;
-          db.prepare("UPDATE readings SET cm3 = ? WHERE id = ?").run(newCm3, latestReading.id);
-          fixedReadings++;
-        }
-      }
-    }
-  });
-  tx();
-
-  recordAudit(req, "bill.fix_prev_readings", "all", `Fixed ${fixedBills} bill(s) and ${fixedReadings} reading(s)`);
-
-  // Regenerate all bills with the corrected readings
-  if (fixedReadings > 0) {
-    const periods = db.prepare("SELECT DISTINCT period FROM bills ORDER BY id DESC").all();
-    let billsRegenerated = 0;
-
-    const billsTx = db.transaction(() => {
-      for (const p of periods) {
-        const households = db.prepare("SELECT id FROM households").all();
-        for (const h of households) {
-          const latestBill = db.prepare("SELECT * FROM bills WHERE household_id = ? AND period = ? ORDER BY id DESC LIMIT 1").get(h.id, p.period);
-          const latestReading = db.prepare("SELECT cm3 FROM readings WHERE household_id = ? ORDER BY recorded_at DESC LIMIT 1").get(h.id);
-
-          if (latestBill && latestReading) {
-            const prevCm3 = latestBill.prev_cm3;
-            const currCm3 = latestReading.cm3;
-            const consumption = Math.max(currCm3 - prevCm3, 0);
-            const amount = computeBillAmount(consumption);
-            const totalDue = +(amount + (latestBill.payment_status !== "Paid" ? latestBill.prev_balance : 0)).toFixed(2);
-
-            db.prepare("UPDATE bills SET curr_cm3 = ?, amount = ?, total_due = ? WHERE id = ?")
-              .run(currCm3, amount, totalDue, latestBill.id);
-            billsRegenerated++;
-          }
-        }
-      }
-    });
-    billsTx();
-
-    return res.json({ success: true, fixedBills, fixedReadings, billsRegenerated, message: `Fixed ${fixedReadings} readings and regenerated ${billsRegenerated} bills` });
-  }
-
-  res.json({ success: true, fixedBills, fixedReadings, message: `Fixed ${fixedBills} bills and ${fixedReadings} readings` });
-});
-
 // POST /api/bills/:id/mark-paid  (admin only) — record a payment the admin
-// witnessed directly (cash in hand, or a GCash payment confirmed by other
-// means than the automatic PayMongo flow). Body: { method: "Offline" | "GCash", amount }
+// witnessed directly (cash in hand, or a GCash payment verified against the
+// transaction record). GCash calls must include its numeric reference.
 router.post("/bills/:id/mark-paid", authMiddleware("admin"), (req, res) => {
-  const { method = "Offline" } = req.body || {};
+  const { method = "Offline", reference } = req.body || {};
   const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
   if (!bill) return res.status(404).json({ error: "Bill not found." });
+  if (!['Offline', 'GCash'].includes(method)) {
+    return res.status(400).json({ error: "Choose Cash or GCash as the payment method." });
+  }
+
+  const paymentReference = method === "GCash" && typeof reference === "string" ? reference.trim() : "";
+  if (method === "GCash" && !/^[0-9]{1,80}$/.test(paymentReference)) {
+    return res.status(400).json({ error: "Enter the numeric GCash transaction reference." });
+  }
 
   db.prepare(
-    `UPDATE bills SET payment_status = 'Paid', payment_method = ?, payment_date = datetime('now')
+    `UPDATE bills SET payment_status = 'Paid', payment_method = ?, payment_ref = ?, payment_date = datetime('now')
      WHERE id = ?`
-  ).run(method, req.params.id);
+  ).run(method, method === "GCash" ? `${QR_PAYMENT_REF_PREFIX}${paymentReference}` : null, req.params.id);
 
   recordAudit(req, "bill.mark_paid", bill.household_id, `Marked ${bill.period} bill Paid (${method}) for ${bill.household_id}`);
   res.json({ success: true });
@@ -518,6 +420,32 @@ router.post("/bills/:id/gcash/initiate", authMiddleware("resident"), async (req,
   }
 });
 
+// POST /api/bills/:id/gcash/reference — resident submits the GCash receipt
+// reference after paying through the displayed QR. An admin verifies it.
+router.post("/bills/:id/gcash/reference", authMiddleware("resident"), (req, res) => {
+  const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
+  if (!bill) return res.status(404).json({ error: "Bill not found." });
+  if (bill.household_id !== req.user.householdId) {
+    return res.status(403).json({ error: "You can only submit a reference for your own bill." });
+  }
+  if (bill.payment_status === "Paid") {
+    return res.status(400).json({ error: "This bill is already paid." });
+  }
+
+  const reference = typeof req.body?.reference === "string" ? req.body.reference.trim() : "";
+  if (!/^[0-9]{1,80}$/.test(reference)) {
+    return res.status(400).json({ error: "Enter a numeric GCash payment reference (up to 80 digits)." });
+  }
+
+  db.prepare(
+    `UPDATE bills SET payment_status = 'GCash Pending', payment_method = 'GCash', payment_ref = ?
+     WHERE id = ?`
+  ).run(`${QR_PAYMENT_REF_PREFIX}${reference}`, req.params.id);
+
+  recordAudit(req, "bill.gcash_reference_submitted", bill.household_id, `Submitted a GCash QR payment reference for ${bill.household_id} (${bill.period})`);
+  res.json({ success: true, status: "GCash Pending" });
+});
+
 // Shared by both sync routes below: re-checks one bill against PayMongo and
 // marks it Paid if confirmed. `bill` must already be access-checked by the
 // caller. Returns the { success, paid, status } payload to send as JSON.
@@ -527,6 +455,9 @@ async function syncBillWithPaymongo(req, bill) {
   }
   if (bill.payment_status !== "GCash Pending" || !bill.payment_ref) {
     return { success: true, paid: false, status: bill.payment_status };
+  }
+  if (bill.payment_ref.startsWith(QR_PAYMENT_REF_PREFIX)) {
+    return { success: true, paid: false, status: "GCash Pending" };
   }
 
   const session = await paymongo.retrieveCheckoutSession(bill.payment_ref);
@@ -596,6 +527,17 @@ router.post("/bills/:id/gcash/confirm", authMiddleware("admin"), (req, res) => {
   if (!bill) return res.status(404).json({ error: "Bill not found." });
   if (bill.payment_status !== "GCash Pending") {
     return res.status(400).json({ error: "This bill is not pending GCash confirmation." });
+  }
+
+  if (bill.payment_ref?.startsWith(QR_PAYMENT_REF_PREFIX)) {
+    const submittedReference = bill.payment_ref.slice(QR_PAYMENT_REF_PREFIX.length).trim();
+    const verifiedReference = typeof req.body?.reference === "string" ? req.body.reference.trim() : "";
+    if (!/^[0-9]{1,80}$/.test(verifiedReference)) {
+      return res.status(400).json({ error: "Enter the numeric reference shown in the GCash transaction record." });
+    }
+    if (verifiedReference.toUpperCase() !== submittedReference.toUpperCase()) {
+      return res.status(400).json({ error: "The verified reference does not match the resident's submitted reference." });
+    }
   }
 
   db.prepare(
@@ -722,7 +664,7 @@ router.post("/readings", authMiddleware("admin", ["officer"]), (req, res) => {
   if (typeof cm3 !== "number" || !Number.isFinite(cm3) || cm3 < 0) {
     return res.status(400).json({ error: "cm3 must be a non-negative number." });
   }
-  if (flowRate !== undefined && (typeof flowRate !== "number" || !Number.isFinite(flowRate) || flowRate < 0)) {
+  if (typeof flowRate !== "number" || !Number.isFinite(flowRate) || flowRate < 0) {
     return res.status(400).json({ error: "flowRate must be a non-negative number." });
   }
   if (flowType !== undefined && !["Normal", "High flow"].includes(flowType)) {
@@ -741,7 +683,7 @@ router.post("/readings", authMiddleware("admin", ["officer"]), (req, res) => {
 
   db.prepare(
     `INSERT INTO readings (household_id, cm3, flow_rate, flow_type, source) VALUES (?, ?, ?, ?, 'manual')`
-  ).run(householdId, cm3, flowRate ?? 0, flowType || "Normal");
+  ).run(householdId, cm3, flowRate, flowType || "Normal");
 
   recordAudit(req, "reading.manual_entry", householdId, `Manually recorded a ${cm3} CM³ reading for ${householdId}`);
   res.json({ success: true });

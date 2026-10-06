@@ -8,13 +8,13 @@ import {
   getToken, adminLogin, adminLogout,
   fetchResidents, fetchBills, fetchBillingPeriods, generateBills,
   fetchReadings, fetchLatestReading,
-  initiateGcash, recordCash, recordUnpaid, confirmGcash, initiateCash, confirmCash, syncGcashByHousehold, fetchPayments,
+  submitGcashReference, recordCash, recordUnpaid, confirmGcash, confirmCash, syncGcashByHousehold, fetchPayments,
   residentLogin, residentGoogleLogin, residentLogout,
   updateResidentProfile, resetResidentPassword, confirmResidentPasswordReset, resolveAlertApi, unresolveAlertApi,
   createHousehold, fetchAlerts, fetchMyAlerts,
+  fetchLeakReports, resolveLeakReportApi, unresolveLeakReportApi,
   fetchDeviceStatus, provisionDevice, revokeDevice, setDeviceCalibration, liveEventsUrl,
   updateAdminProfile,
-  fetchLeakReports, resolveLeakReportApi, unresolveLeakReportApi,
 } from "./api";
 import { residentToHousehold } from "./databridge.js";
 import { jwtDecode } from "jwt-decode";
@@ -62,40 +62,19 @@ export default function WaterSystemPrototype() {
   // shared state — populated either from API or from mock data
   const [households, setHouseholds] = useState([]);
   const [alerts, setAlerts] = useState([]);
-  const [myAlerts, setMyAlerts] = useState([]);
   const [leakReports, setLeakReports] = useState([]);
+  const [myAlerts, setMyAlerts] = useState([]);
   const [activeResidentId, setActiveResidentId] = useState(residentSession?.householdId || null);
 
   const [toast, setToast] = useState(null);
-  const [adminPage, setAdminPageState] = useState(() => {
-    if (!adminSession) return "login";
-    return localStorage.getItem("adminPage") || "dashboard";
-  });
-  const [residentPage, setResidentPageState] = useState(() => {
-    if (!residentSession) return "login";
-    return localStorage.getItem("residentPage") || "dashboard";
-  });
-
-  const setAdminPage = (page) => {
-    setAdminPageState(page);
-    localStorage.setItem("adminPage", page);
-  };
-
-  const setResidentPage = (page) => {
-    setResidentPageState(page);
-    localStorage.setItem("residentPage", page);
-  };
+  const [adminPage, setAdminPage] = useState(adminSession ? "dashboard" : "login");
+  const [residentPage, setResidentPage] = useState(residentSession ? "dashboard" : "login");
   const [alertFilter, setAlertFilter] = useState("All");
   const [selectedAlertId, setSelectedAlertId] = useState(null);
   const [paymentModal, setPaymentModal] = useState(null);
   // { id, action: "resolve" | "unresolve" } while a confirmation is pending.
   const [confirmAlert, setConfirmAlert] = useState(null);
   const [paymentStep, setPaymentStep] = useState("confirm");
-  const [paymentReceipt, setPaymentReceipt] = useState(null);
-  // Which method the resident picked in the payment modal — "gcash" (goes
-  // through PayMongo) or "cash" (declares intent to pay in person; an admin
-  // must confirm the handoff before the bill becomes Paid).
-  const [paymentMethod, setPaymentMethod] = useState("gcash");
   const [loading, setLoading] = useState(USE_API);
 
   const toastTimer = useRef(null);
@@ -651,30 +630,21 @@ export default function WaterSystemPrototype() {
     };
   }, [residentAuthenticated]); // eslint-disable-line
 
-  async function handleGenerateBills(period, force, onMessage) {
+  async function handleGenerateBills(period) {
     if (!USE_API) {
-      if (onMessage) onMessage("Bill generation requires the backend to be running.");
-      else showToast("Bill generation requires the backend to be running.", "warn");
+      showToast("Bill generation requires the backend to be running.", "warn");
       return;
     }
     try {
-      const result = await generateBills(period, force);
+      const result = await generateBills(period);
       await loadFromAPI(true);
-      const msg = force
-        ? `Recalculated ${result.created} new and updated ${result.updated} existing bills for ${period} with tiered pricing.`
-        : `Generated ${result.created} bill(s) for ${period}${result.skipped ? ` — ${result.skipped} already billed` : "."}`;
-      if (onMessage) {
-        onMessage(msg);
-      } else {
-        showToast(msg, "success");
-      }
+      showToast(
+        `Generated ${result.created} bill(s) for ${period}` +
+          (result.skipped ? ` — ${result.skipped} household(s) already billed for this period.` : "."),
+        "success"
+      );
     } catch (err) {
-      const errMsg = "Could not generate bills: " + err.message;
-      if (onMessage) {
-        onMessage(errMsg);
-      } else {
-        showToast(errMsg, "warn");
-      }
+      showToast("Could not generate bills: " + err.message, "warn");
     }
   }
 
@@ -683,28 +653,34 @@ export default function WaterSystemPrototype() {
   // "Offline" (cash, received in person) or "GCash" (recorded manually,
   // e.g. the resident paid but staff confirmed it by other means rather
   // than through the automatic PayMongo flow).
-  async function markPaid(id, paymentMethod = "Offline", paymentStamp) {
+  async function markPaid(id, paymentMethod = "Offline", paymentStamp, paymentReference) {
     if (USE_API) {
       try {
         const household = households.find((h) => h.id === id);
         if (!household?.bill_id) throw new Error("No bill found for this household.");
-        await recordCash(household.bill_id, household.totalDue, paymentMethod);
+        await recordCash(household.bill_id, household.totalDue, paymentMethod, paymentReference);
         await loadFromAPI(true); // refresh from backend
-        showToast("Payment recorded.", "success");
+        return true;
       } catch (err) {
         showToast("Payment error: " + err.message, "warn");
+        return false;
       }
-      return;
+    }
+
+    if (paymentMethod === "GCash" && !/^[0-9]{1,80}$/.test(String(paymentReference || ""))) {
+      showToast("Enter a numeric GCash reference before recording payment.", "warn");
+      return false;
     }
 
     // Mock path
     setHouseholds((prev) =>
       prev.map((h) =>
         h.id === id
-          ? { ...h, paymentStatus: "Paid", paymentMethod, paymentStamp: paymentStamp || h.paymentStamp }
+          ? { ...h, paymentStatus: "Paid", paymentMethod, paymentReference: paymentReference || h.paymentReference, paymentStamp: paymentStamp || h.paymentStamp }
           : h
       )
     );
+    return true;
   }
 
   // Undo an accidental payment — reverts a Paid bill back to Unpaid.
@@ -730,20 +706,26 @@ export default function WaterSystemPrototype() {
     );
   }
 
-  async function receiveGcashPayment(id) {
+  async function receiveGcashPayment(id, reference) {
     if (USE_API) {
       try {
         const household = households.find((h) => h.id === id);
         if (!household?.bill_id) throw new Error("No bill found for this household.");
-        await confirmGcash(household.bill_id);
+        await confirmGcash(household.bill_id, reference);
         await loadFromAPI(true); // refresh from backend
         showToast(`${id} GCash payment received and confirmed`, "success");
+        return true;
       } catch (err) {
         showToast("GCash confirmation error: " + err.message, "warn");
+        return false;
       }
-      return;
     }
 
+    const household = households.find((h) => h.id === id);
+    if (household?.paymentReference && reference?.trim().toUpperCase() !== household.paymentReference.trim().toUpperCase()) {
+      showToast("GCash confirmation error: the reference does not match the resident's submission.", "warn");
+      return false;
+    }
     // Mock path
     setHouseholds((prev) =>
       prev.map((h) =>
@@ -753,6 +735,7 @@ export default function WaterSystemPrototype() {
       )
     );
     showToast(`${id} GCash payment received and confirmed`, "success");
+    return true;
   }
 
   // Admin confirms cash they've physically received for a resident's
@@ -838,83 +821,36 @@ export default function WaterSystemPrototype() {
     showToast("Leak report reopened", "success");
   }
 
-  // ── Payment (GCash or Cash) ─────────────────────────────────────
-  // method: "gcash" (default, PayMongo checkout) or "cash" (declares intent
-  // to pay in person — see confirmGcashPayment's "cash" branch below).
-  function startGcashPayment(id, method = "gcash") {
+  // ── GCash QR payment ────────────────────────────────────────────
+  function startGcashPayment(id) {
     setPaymentModal(id);
-    setPaymentMethod(method);
     setPaymentStep("confirm");
   }
 
-  async function confirmGcashPayment() {
+  async function confirmGcashPayment(reference) {
     setPaymentStep("processing");
-
-    if (paymentMethod === "cash") {
-      try {
-        const household = households.find((h) => h.id === paymentModal);
-        if (!household?.bill_id) throw new Error("No bill found.");
-        if (USE_API) {
-          await initiateCash(household.bill_id);
-          await loadFromAPI(true);
-        } else {
-          setHouseholds((prev) =>
-            prev.map((h) => (h.id === paymentModal ? { ...h, paymentStatus: "Cash Pending", paymentMethod: "Offline" } : h))
-          );
-        }
-        setPaymentStep("cash-pending");
-      } catch (err) {
-        setPaymentStep("confirm");
-        showToast("Cash payment error: " + err.message, "warn");
+    try {
+      const household = households.find((h) => h.id === paymentModal);
+      if (USE_API && !household?.bill_id) throw new Error("No bill found.");
+      if (USE_API) {
+        await submitGcashReference(household.bill_id, reference);
+        await loadFromAPI(true);
+      } else {
+        const paymentReference = reference.trim();
+        setHouseholds((prev) =>
+          prev.map((h) =>
+            h.id === paymentModal
+              ? { ...h, paymentStatus: "GCash Pending", paymentMethod: "GCash", paymentReference }
+              : h
+          )
+        );
       }
-      return;
+      setPaymentStep("gcash-pending");
+      showToast("GCash reference submitted for admin verification.", "info");
+    } catch (err) {
+      setPaymentStep("confirm");
+      showToast("Could not submit GCash reference: " + err.message, "warn");
     }
-
-    if (USE_API) {
-      try {
-        const household = households.find((h) => h.id === paymentModal);
-        if (!household?.bill_id) throw new Error("No bill found.");
-        const result = await initiateGcash(household.bill_id);
-        if (result.checkout_url) {
-          // Real PayMongo checkout — hand the whole tab off to PayMongo's
-          // hosted page. PayMongo redirects back to /resident?paidBill=<id>
-          // (see the effect below) once the resident finishes paying, at
-          // which point we independently verify with PayMongo before
-          // marking the bill Paid.
-          window.location.href = result.checkout_url;
-        } else {
-          throw new Error("PayMongo did not return a checkout link.");
-        }
-      } catch (err) {
-        setPaymentStep("confirm");
-        showToast("GCash error: " + err.message, "warn");
-      }
-      return;
-    }
-
-    // Mock path (USE_API off, no backend): simulate the pending state locally.
-    setTimeout(() => {
-      const receipt = {
-        ref: `GC${Date.now().toString().slice(-8)}`,
-        date: new Date().toLocaleString("en-PH", {
-          month: "short", day: "numeric", year: "numeric",
-          hour: "2-digit", minute: "2-digit",
-        }),
-        method: "GCash",
-      };
-
-      setHouseholds((prev) =>
-        prev.map((h) =>
-          h.id === paymentModal
-            ? { ...h, paymentStatus: "GCash Pending", paymentMethod: "GCash", paymentStamp: receipt }
-            : h
-        )
-      );
-
-      setPaymentStep("success");
-      setPaymentReceipt(receipt);
-      showToast("GCash payment initiated - Pending admin confirmation", "info");
-    }, 1500);
   }
 
   // Re-checks a pending PayMongo payment and marks it Paid if confirmed.
@@ -1043,14 +979,10 @@ export default function WaterSystemPrototype() {
         <GcashModal
           household={households.find((h) => h.id === paymentModal)}
           step={paymentStep}
-          method={paymentMethod}
-          receipt={paymentReceipt}
           onConfirm={confirmGcashPayment}
           onClose={() => {
             setPaymentModal(null);
             setPaymentStep("confirm");
-            setPaymentReceipt(null);
-            setPaymentMethod("gcash");
           }}
         />
       )}

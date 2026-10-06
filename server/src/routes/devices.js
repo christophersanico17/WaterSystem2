@@ -65,13 +65,12 @@ function checkRealTimeFlow(householdId, flowRateLpm, settings, highFlowLpm) {
 
   // Walk back through recent *device* readings while flow has stayed
   // continuously at/above the leak threshold — source = 'device' excludes
-  // seed/mock/manual rows from the streak. With 5-second reporting intervals,
-  // we need 180 readings for ~15 minutes of history (same as the old 15-second interval).
+  // seed/mock/manual rows from the streak.
   const recent = db
     .prepare(
       `SELECT flow_rate, recorded_at FROM readings
        WHERE household_id = ? AND source = 'device'
-       ORDER BY recorded_at DESC LIMIT 180`
+       ORDER BY recorded_at DESC LIMIT 60`
     )
     .all(householdId);
   const streakMinutes = computeLeakStreakMinutes(recent, settings, Date.now());

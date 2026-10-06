@@ -3,7 +3,7 @@
 // this app already expects (prevCm3, currCm3, totalDue, history, etc.)
 // This keeps all existing UI components unchanged when USE_API is true.
 
-import { dueDateForPeriod, billingDateForPeriod } from "./data";
+import { currentBillingPeriod, dueDateForPeriod, billingDateForPeriod } from "./data";
 
 const RATE_PER_CM3 = 20;
 const MIN_BILL = 200;
@@ -44,16 +44,18 @@ export function residentToHousehold(resident, latestBill, reading, allBills = []
 
   const paymentStatus = latestBill ? latestBill.payment_status : "Unpaid";
   const paymentMethod = latestBill ? latestBill.payment_method : null;
+  const rawPaymentRef = latestBill ? latestBill.payment_ref : null;
+  const paymentReference = rawPaymentRef?.startsWith("QR:") ? rawPaymentRef.slice(3) : null;
   const paymentStamp =
     latestBill && latestBill.payment_method === "GCash"
       ? {
-          ref: latestBill.payment_ref,
+          ref: paymentReference || rawPaymentRef,
           date: latestBill.payment_date,
           method: "GCash",
         }
       : undefined;
 
-  const period = latestBill ? latestBill.period : "May 2026";
+  const period = latestBill ? latestBill.period : currentBillingPeriod();
   const dueDate = latestBill && latestBill.due_date ? latestBill.due_date : dueDateForPeriod(period);
   const billingDate = billingDateForPeriod(period);
 
@@ -83,6 +85,7 @@ export function residentToHousehold(resident, latestBill, reading, allBills = []
 
     paymentStatus,
     paymentMethod,
+    paymentReference,
     paymentStamp,
 
     lastFlow: reading ? reading.flow_rate : 0,
@@ -98,7 +101,7 @@ export function residentToHousehold(resident, latestBill, reading, allBills = []
     passwordResetRequested: Boolean(resident.password_reset_requested),
 
     bill_id: latestBill ? latestBill.id : null,
-    history: history.length > 0 ? history : [{ period: "May 2026", prev: 0, curr: 0, amt: MIN_BILL }],
+    history: history.length > 0 ? history : [{ period, prev: 0, curr: 0, amt: MIN_BILL }],
   };
 }
 

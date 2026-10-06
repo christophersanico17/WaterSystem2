@@ -970,7 +970,7 @@ export function ResidentDashboard({ me, setPage, alerts = [] }) {
           <tbody>
             {me.history.map((rec, i) => {
               const isLast = i === me.history.length - 1;
-              const status = isLast ? me.paymentStatus : rec.paid ? "Paid" : "Unpaid";
+              const status = isLast ? me.paymentStatus : "Paid";
               return (
                 <tr key={rec.period} className={i % 2 ? "bg-slate-50" : "bg-white"}>
                   <td className="px-3 py-1.5 font-medium text-slate-700">{rec.period}</td>
@@ -1015,11 +1015,11 @@ export function ResidentBills({ me, setPage, startGcashPayment }) {
         label: rec.period,
         tag: isLatest ? "Current" : null,
         dueDate: isLatest ? formatDueDate(dueDateForPeriod(rec.period)) : null,
-        paidDate: !isLatest && rec.paid
+        paidDate: !isLatest
           ? `${rec.period.split(" ")[0].slice(0, 3)} ${parseInt(rec.period.split(" ")[0]) || 20}, ${rec.period.split(" ")[1]}`
           : null,
         amount: rec.amt,
-        paid: isLatest ? me.paymentStatus === "Paid" : Boolean(rec.paid),
+        paid: !isLatest || me.paymentStatus === "Paid",
         rec,
         consumed,
       };
@@ -1083,11 +1083,6 @@ export function ResidentBills({ me, setPage, startGcashPayment }) {
                           Paid
                         </span>
                       )}
-                      {!period.paid && !period.tag && (
-                        <span className="text-[10px] bg-rose-50 text-rose-700 font-semibold px-1.5 py-0.5 rounded">
-                          Unpaid
-                        </span>
-                      )}
                     </div>
                     {period.dueDate && !period.paid && (
                       <div className="text-[11px] text-rose-500 font-medium">
@@ -1097,7 +1092,7 @@ export function ResidentBills({ me, setPage, startGcashPayment }) {
                     {period.paid && period.tag && (
                       <div className="text-[11px] text-emerald-600 font-medium">Paid</div>
                     )}
-                    {!period.tag && period.paid && (
+                    {!period.tag && (
                       <div className="text-[11px] text-slate-400">
                         Paid on {period.label.split(" ")[0].slice(0, 3)} 20,{" "}
                         {period.label.split(" ")[1]}
@@ -1225,26 +1220,14 @@ export function ResidentBills({ me, setPage, startGcashPayment }) {
             <BillReplica me={me} period={selected} />
           </div>
 
-          {/* Pay buttons for unpaid current bill — GCash or Cash */}
+          {/* Pay by GCash QR for the current unpaid bill */}
           {selectedIdx === 0 && me.paymentStatus === "Unpaid" && (
-            <div className="mt-3 flex flex-col sm:flex-row gap-2">
+            <div className="mt-3">
               <button
                 onClick={() => startGcashPayment(me.id)}
-                className="flex-1 flex items-center justify-center gap-2 bg-[#0072CE] hover:bg-[#005ea3] text-white font-semibold text-sm py-2.5 rounded-lg transition"
+                className="w-full flex items-center justify-center gap-2 bg-[#0072CE] hover:bg-[#005ea3] text-white font-semibold text-sm py-2.5 rounded-lg transition"
               >
-                <span className="bg-white text-[#0072CE] rounded px-1.5 py-0.5 text-xs font-extrabold">
-                  G
-                </span>
-                Pay with GCash
-              </button>
-              <button
-                onClick={() => startGcashPayment(me.id, "cash")}
-                className="flex-1 flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm py-2.5 rounded-lg transition"
-              >
-                <span className="bg-white text-emerald-600 rounded px-1.5 py-0.5 text-xs font-extrabold">
-                  ₱
-                </span>
-                Pay with Cash
+                Pay with GCash QR
               </button>
             </div>
           )}
@@ -1258,18 +1241,7 @@ export function ResidentBills({ me, setPage, startGcashPayment }) {
 // ─────────────────────────────────────────────────────────────
 // PAYMENT HISTORY  (was "Make Payment" — now shows history + pay option)
 // ─────────────────────────────────────────────────────────────
-export function ResidentPayments({ me, startGcashPayment, syncPendingPayment }) {
-  const [checking, setChecking] = React.useState(false);
-
-  async function handleCheckStatus() {
-    setChecking(true);
-    try {
-      await syncPendingPayment?.(me.id);
-    } finally {
-      setChecking(false);
-    }
-  }
-
+export function ResidentPayments({ me, startGcashPayment }) {
   return (
     <>
       <div className="mb-4">
@@ -1277,24 +1249,16 @@ export function ResidentPayments({ me, startGcashPayment, syncPendingPayment }) 
         <p className="text-xs text-slate-500 mt-0.5">All your payment records and pay your current bill</p>
       </div>
 
-      {/* Pending PayMongo checkout — shown once the resident has started (or
-          returned from) a GCash payment but PayMongo hasn't confirmed it yet. */}
+        {/* A submitted QR payment reference remains pending until an admin verifies it. */}
       {me.paymentStatus === "GCash Pending" && (
         <div className="rounded-lg px-4 py-3 mb-4 flex items-center justify-between border bg-sky-50 border-sky-200">
           <div>
-            <div className="text-[13px] font-semibold text-sky-800">Payment pending confirmation</div>
+            <div className="text-[13px] font-semibold text-sky-800">Waiting for admin verification</div>
             <div className="text-xs mt-0.5 text-sky-700">
-              We're waiting for PayMongo to confirm your GCash payment of{" "}
-              <span className="font-bold">{peso(me.totalDue)}</span>. This is usually instant.
+              GCash reference <span className="font-semibold">{me.paymentReference || "submitted"}</span> for{" "}
+              <span className="font-bold"> {peso(me.totalDue)}</span> is under review.
             </div>
           </div>
-          <button
-            onClick={handleCheckStatus}
-            disabled={checking}
-            className="flex-shrink-0 ml-4 bg-sky-600 text-white text-[12px] font-semibold px-3 py-2 rounded-lg hover:bg-sky-700 transition disabled:opacity-60"
-          >
-            {checking ? "Checking…" : "Check payment status"}
-          </button>
         </div>
       )}
 
@@ -1332,19 +1296,7 @@ export function ResidentPayments({ me, startGcashPayment, syncPendingPayment }) 
               onClick={() => startGcashPayment(me.id)}
               className="flex items-center gap-1.5 bg-[#0072CE] text-white text-[12px] font-semibold px-3 py-2 rounded-lg hover:bg-[#005ea3] transition"
             >
-              <span className="bg-white text-[#0072CE] rounded px-1 py-0.5 text-[10px] font-extrabold">
-                G
-              </span>
-              Pay with GCash
-            </button>
-            <button
-              onClick={() => startGcashPayment(me.id, "cash")}
-              className="flex items-center gap-1.5 bg-emerald-600 text-white text-[12px] font-semibold px-3 py-2 rounded-lg hover:bg-emerald-700 transition"
-            >
-              <span className="bg-white text-emerald-600 rounded px-1 py-0.5 text-[10px] font-extrabold">
-                ₱
-              </span>
-              Pay with Cash
+              Pay with GCash QR
             </button>
           </div>
         </div>
@@ -1366,7 +1318,7 @@ export function ResidentPayments({ me, startGcashPayment, syncPendingPayment }) 
 
       {/* GCash payment section */}
       <div className="max-w-xl mb-5">
-        <GcashBillingSection me={me} onPay={startGcashPayment} onCheckStatus={handleCheckStatus} checking={checking} />
+        <GcashBillingSection me={me} onPay={startGcashPayment} />
       </div>
 
       {/* Payment history table */}
@@ -1387,8 +1339,8 @@ export function ResidentPayments({ me, startGcashPayment, syncPendingPayment }) 
           <tbody>
             {me.history.map((rec, i) => {
               const isLast = i === me.history.length - 1;
-              const status = isLast ? me.paymentStatus : rec.paid ? "Paid" : "Unpaid";
-              const method = isLast ? me.paymentMethod : rec.method;
+              const status = isLast ? me.paymentStatus : "Paid";
+              const method = isLast ? me.paymentMethod : i % 2 === 0 ? "GCash" : "Cash";
               return (
                 <tr key={rec.period} className={i % 2 ? "bg-slate-50" : "bg-white"}>
                   <td className="px-3 py-2 font-medium text-slate-700">{rec.period}</td>
@@ -1396,15 +1348,15 @@ export function ResidentPayments({ me, startGcashPayment, syncPendingPayment }) 
                     {peso(rec.amt)}
                   </td>
                   <td className="px-3 py-2 text-center">
-                    {status === "Paid" ? (
+                    {status === "Paid" || status === "GCash Pending" ? (
                       <span
                         className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
-                          method === "GCash"
+                          method === "GCash" || status === "GCash Pending"
                             ? "bg-sky-50 text-sky-700"
                             : "bg-slate-100 text-slate-600"
                         }`}
                       >
-                        {method || "—"}
+                        {method || (status === "GCash Pending" ? "GCash" : "—")}
                       </span>
                     ) : (
                       <span className="text-[11px] text-slate-400">—</span>
@@ -1413,6 +1365,10 @@ export function ResidentPayments({ me, startGcashPayment, syncPendingPayment }) 
                   <td className="px-3 py-2 text-center">
                     {status === "Paid" ? (
                       <Badge tone="good">Paid</Badge>
+                    ) : status === "GCash Pending" ? (
+                      <Badge tone="info">Pending verification</Badge>
+                    ) : status === "Cash Pending" ? (
+                      <Badge tone="warn">Cash pending</Badge>
                     ) : (
                       <Badge tone="bad">Unpaid</Badge>
                     )}

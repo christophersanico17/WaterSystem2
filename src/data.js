@@ -11,8 +11,20 @@ export const seedHouseholds = [
 
 export const RATE_PER_CM3 = 20;
 export const MIN_BILL = 200;
-export const BILLING_PERIOD = "Month of May 2026";
 export const MONTH_SHORT_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+export function currentBillingPeriod(date = new Date()) {
+  return `${MONTH_SHORT_NAMES[date.getMonth()]} ${date.getFullYear()}`;
+}
+
+export const BILLING_PERIOD = `Month of ${currentBillingPeriod()}`;
+
+function previousBillingPeriods(count, date = new Date()) {
+  return Array.from({ length: count }, (_, index) => {
+    const previousDate = new Date(date.getFullYear(), date.getMonth() - count + index, 1);
+    return currentBillingPeriod(previousDate);
+  });
+}
 
 // Dates are handled as plain "YYYY-MM-DD" strings throughout (no time/zone
 // component). Parsing "YYYY-MM-DD" via `new Date(str)` treats it as UTC
@@ -26,7 +38,7 @@ export function formatDueDate(isoDate) {
   return date.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" });
 }
 
-export function dueDateForPeriod(period = "May 2026") {
+export function dueDateForPeriod(period = currentBillingPeriod()) {
   const [month, year] = period.split(" ");
   const monthIndex = MONTH_SHORT_NAMES.indexOf(month);
   let dueMonth = monthIndex + 1;
@@ -38,7 +50,7 @@ export function dueDateForPeriod(period = "May 2026") {
   return `${dueYear}-${String(dueMonth + 1).padStart(2, "0")}-09`;
 }
 
-export function billingDateForPeriod(period = "May 2026") {
+export function billingDateForPeriod(period = currentBillingPeriod()) {
   const [month, year] = period.split(" ");
   const monthIndex = MONTH_SHORT_NAMES.indexOf(month);
   return `${year}-${String(monthIndex + 1).padStart(2, "0")}-25`;
@@ -139,7 +151,8 @@ export function buildInitialHouseholds() {
       method: "GCash",
     } : undefined;
 
-    const period = "May 2026";
+    const period = currentBillingPeriod();
+    const historyPeriods = previousBillingPeriods(4);
     const dueDate = dueDateForPeriod(period);
     const billingDate = billingDateForPeriod(period);
     return {
@@ -161,11 +174,11 @@ export function buildInitialHouseholds() {
       lastFlow: 2 + Math.floor(Math.random() * 5),
       flowType: "Normal",
       history: [
-        { period: "Jan 2026", prev: 20, curr: 28, amt: 200, paid: true },
-        { period: "Feb 2026", prev: 28, curr: 44, amt: 320, paid: true },
-        { period: "Mar 2026", prev: 44, curr: 50, amt: 200, paid: true },
-        { period: "Apr 2026", prev: 50, curr: 53, amt: 200, paid: true },
-        { period: "May 2026", prev, curr: current, amt: amount, paid: paymentStatus === "Paid" },
+        { period: historyPeriods[0], prev: 20, curr: 28, amt: 200, paid: true },
+        { period: historyPeriods[1], prev: 28, curr: 44, amt: 320, paid: true },
+        { period: historyPeriods[2], prev: 44, curr: 50, amt: 200, paid: true },
+        { period: historyPeriods[3], prev: 50, curr: 53, amt: 200, paid: true },
+        { period, prev, curr: current, amt: amount, paid: paymentStatus === "Paid" },
       ],
     };
   });

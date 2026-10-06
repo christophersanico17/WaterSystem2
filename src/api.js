@@ -254,25 +254,18 @@ export async function fetchBillingPeriods() {
   return request("/bills/periods");
 }
 
-export async function generateBills(period, force) {
+export async function generateBills(period) {
   return request("/bills/generate", {
     method: "POST",
-    body: { period, force },
+    body: { period },
     auth: "admin",
   });
 }
 
-export async function fixMeterReadings() {
-  return request("/bills/fix-prev-readings", {
-    method: "POST",
-    auth: "admin",
-  });
-}
-
-export async function recordCash(billId, amount, method = "Offline") {
+export async function recordCash(billId, amount, method = "Offline", reference) {
   return request(`/bills/${billId}/mark-paid`, {
     method: "POST",
-    body: { method, amount },
+    body: { method, amount, reference },
     auth: "admin",
   });
 }
@@ -291,9 +284,18 @@ export async function initiateGcash(billId) {
   });
 }
 
-export async function confirmGcash(billId) {
+export async function submitGcashReference(billId, reference) {
+  return request(`/bills/${billId}/gcash/reference`, {
+    method: "POST",
+    body: { reference },
+    auth: "resident",
+  });
+}
+
+export async function confirmGcash(billId, reference) {
   return request(`/bills/${billId}/gcash/confirm`, {
     method: "POST",
+    body: reference ? { reference } : undefined,
     auth: "admin",
   });
 }
@@ -349,14 +351,6 @@ export async function fetchReadings(householdId) {
 
 export async function fetchLatestReading(meterNo) {
   return request(`/readings/latest/${encodeURIComponent(meterNo)}`, { auth: activeAuthRole() });
-}
-
-export async function submitManualReading(householdId, cm3) {
-  return request("/readings", {
-    method: "POST",
-    body: { householdId, cm3 },
-    auth: "admin",
-  });
 }
 
 // ── Alerts ───────────────────────────────────────────────────

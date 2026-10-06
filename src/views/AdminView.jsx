@@ -125,8 +125,6 @@ export function AdminView(props) {
   const navItems = NAV_ITEMS.filter((item) => isOfficer || !item.officerOnly);
 
   const unresolvedCount = alerts.filter((a) => a.status === "Unresolved").length;
-  const openLeakReportCount = leakReports.filter((r) => r.status === "Open").length;
-  const pendingConfirmationCount = households.filter((h) => h.paymentStatus === "GCash Pending" || h.paymentStatus === "Cash Pending").length;
   const gcashPendingCount = households.filter((h) => h.paymentStatus === "GCash Pending").length;
   const [collapsed, setCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -235,11 +233,8 @@ export function AdminView(props) {
           {navItems.map((item) => {
             const isActive = activePage === item.id;
             const badgeCount =
-              item.id === "alerts" ? unresolvedCount
-              : item.id === "leakreports" ? openLeakReportCount
-              : item.id === "billing" ? pendingConfirmationCount
-              : 0;
-            const badgeColor = item.id === "alerts" || item.id === "leakreports" ? "text-rose-400" : "text-sky-300";
+              item.id === "alerts" ? unresolvedCount : item.id === "billing" ? gcashPendingCount : 0;
+            const badgeColor = item.id === "alerts" ? "text-rose-400" : "text-sky-300";
             return (
               <button
                 key={item.id}
@@ -330,7 +325,6 @@ export function AdminView(props) {
               unpaidCount={unpaidCount}
               onGenerateBills={onGenerateBills}
               canGenerateBills={isOfficer}
-              setPage={setPage}
             />
           )}
           {activePage === "alerts" && (
