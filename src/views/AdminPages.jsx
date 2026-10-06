@@ -16,8 +16,6 @@ import {
   fetchAdminAccounts,
   createAdminAccount,
   deleteAdminAccount,
-  submitManualReading,
-  fixMeterReadings,
 } from "../api";
 
 const MONTHS = [
@@ -347,7 +345,7 @@ export function ConsumptionPage({ households }) {
   );
 }
 
-export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPayment, receiveCashPayment, showToast, billsGenerated, unpaidCount, onGenerateBills, canGenerateBills = true, onBillsGenerated }) {
+export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPayment, receiveCashPayment, showToast, billsGenerated, unpaidCount, onGenerateBills, canGenerateBills = true }) {
   const paidCount = households.length - unpaidCount;
   const gcashPendingCount = households.filter((h) => h.paymentStatus === "GCash Pending").length;
   const cashPendingCount = households.filter((h) => h.paymentStatus === "Cash Pending").length;
@@ -426,16 +424,8 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
     November: "Nov",
     December: "Dec",
   };
-  const [selectedBillingMonth, setSelectedBillingMonth] = React.useState(() => {
-    const match = BILLING_PERIOD.match(/Month of\s+(\w+)\s+(\d{4})/);
-    return match ? match[1] : "May";
-  });
-  const [selectedBillingYear, setSelectedBillingYear] = React.useState(() => {
-    const match = BILLING_PERIOD.match(/Month of\s+(\w+)\s+(\d{4})/);
-    return match ? match[2] : "2026";
-  });
-  const [generationMessage, setGenerationMessage] = React.useState(null);
-  const [confirmRegenerate, setConfirmRegenerate] = React.useState(false);
+  const [selectedBillingMonth, setSelectedBillingMonth] = React.useState("May");
+  const [selectedBillingYear, setSelectedBillingYear] = React.useState("2026");
   const selectedPeriodLabel =
     selectedBillingMonth === "All months"
       ? selectedBillingYear === "All years"
@@ -470,50 +460,6 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
   return (
     <>
       <SectionHeader title="Billing Management" />
-      {generationMessage && (
-        <div className="mb-4 bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-emerald-800 text-sm">
-          {generationMessage}
-          <button
-            onClick={() => setGenerationMessage(null)}
-            className="float-right text-emerald-600 hover:text-emerald-700 font-semibold"
-          >
-            ✕
-          </button>
-        </div>
-      )}
-      {confirmRegenerate && (
-        <div className="mb-4 bg-amber-50 border border-amber-300 rounded-lg p-4">
-          <div className="text-amber-900 font-semibold mb-3">
-            Regenerate bills for {selectedPeriodLabel}?
-          </div>
-          <p className="text-amber-800 text-sm mb-4">
-            This will delete and recalculate all amounts with tiered pricing.
-          </p>
-          <div className="flex gap-2">
-            <Btn
-              variant="primary"
-              onClick={() => {
-                setConfirmRegenerate(false);
-                if (typeof onGenerateBills === "function") {
-                  onGenerateBills(selectedPeriodKey, true, (msg) => setGenerationMessage(msg));
-                } else {
-                  setGenerationMessage("Bills regenerated");
-                }
-              }}
-              className="text-sm"
-            >
-              Confirm Regenerate
-            </Btn>
-            <Btn
-              variant="outline"
-              onClick={() => setConfirmRegenerate(false)}
-              className="text-sm"
-            >
-              Cancel
-            </Btn>
-          </div>
-        </div>
-      )}
       <div className="flex flex-wrap items-end gap-3 mb-4">
         <div className="flex flex-wrap items-end gap-2">
           <div>
@@ -542,55 +488,23 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
           </div>
         </div>
         <div className="ml-auto flex gap-2">
-          <Btn
-            variant="outline"
-            onClick={async () => {
-              try {
-                const data = await fixMeterReadings();
-                if (data.success) {
-                  setGenerationMessage(`Fixed meter readings in ${data.fixed} bill(s)`);
-                  setTimeout(() => window.location.reload(), 1500);
-                } else {
-                  setGenerationMessage(data.message || "Could not fix readings");
-                }
-              } catch (err) {
-                setGenerationMessage("Error: " + err.message);
-              }
-            }}
-            className="text-sm"
-          >
-            Fix Meter Readings
-          </Btn>
           {canGenerateBills && (
-            <div className="flex gap-2">
-              <Btn
-                variant="primary"
-                onClick={() => {
-                  if (!selectedPeriodKey) {
-                    setGenerationMessage("Select a specific billing month and year first.");
-                    return;
-                  }
-                  if (typeof onGenerateBills === "function") {
-                    onGenerateBills(selectedPeriodKey, false, (msg) => setGenerationMessage(msg));
-                  } else {
-                    setGenerationMessage("Bills generated for all households");
-                  }
-                }}
-              >
-                Generate Bills
-              </Btn>
-              <Btn
-                onClick={() => {
-                  if (!selectedPeriodKey) {
-                    setGenerationMessage("Select a billing month and year first.");
-                    return;
-                  }
-                  setConfirmRegenerate(true);
-                }}
-              >
-                Recalculate with New Rates
-              </Btn>
-            </div>
+            <Btn
+              variant="primary"
+              onClick={() => {
+                if (!selectedPeriodKey) {
+                  showToast("Select a specific billing month and year first.", "warn");
+                  return;
+                }
+                if (typeof onGenerateBills === "function") {
+                  onGenerateBills(selectedPeriodKey);
+                } else {
+                  showToast("Bills generated for all households", "success");
+                }
+              }}
+            >
+              Generate Bills
+            </Btn>
           )}
           <Btn onClick={() => window.print()}>Export PDF</Btn>
           <Btn onClick={() => {
@@ -1078,6 +992,167 @@ export function AlertsPage({ alerts, filter, setFilter, selectedAlertId, setSele
   );
 }
 
+export function LeakReportsPage({ leakReports, resolveLeakReport, reopenLeakReport }) {
+  const [filter, setFilter] = useState("All");
+  const [viewId, setViewId] = useState(null);
+
+  const filters = ["All", "Open", "Resolved"];
+  const counts = {
+    All: leakReports.length,
+    Open: leakReports.filter((r) => r.status === "Open").length,
+    Resolved: leakReports.filter((r) => r.status === "Resolved").length,
+  };
+
+  const filtered = leakReports.filter((r) => filter === "All" || r.status === filter);
+  const viewed = viewId ? leakReports.find((r) => r.id === viewId) : null;
+
+  const severityColor = (s) =>
+    s === "major" ? "text-rose-600" : s === "moderate" ? "text-amber-600" : "text-slate-500";
+
+  return (
+    <>
+      <SectionHeader title="Resident Leak Reports" sub="Water leaks and pipe issues reported by residents" />
+
+      <div className="flex gap-1.5 mb-4 flex-wrap">
+        {filters.map((f) => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            className={`text-[11px] font-medium px-2.5 py-1 rounded-full border transition ${
+              filter === f ? "bg-[#1e3a5f] text-white border-[#1e3a5f]" : "bg-white text-slate-600 border-slate-300 hover:bg-slate-50"
+            }`}
+          >
+            {f} ({counts[f]})
+          </button>
+        ))}
+      </div>
+
+      <div className="flex gap-3 flex-wrap mb-4">
+        <StatCard label="Total reports" value={counts.All} accent="border-t-slate-300" />
+        <StatCard label="Open" value={counts.Open} tone="bad" accent="border-t-rose-400" />
+        <StatCard label="Resolved" value={counts.Resolved} tone="good" accent="border-t-emerald-400" />
+      </div>
+
+      <div className="card-hover bg-white rounded-lg border border-slate-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px] min-w-[720px]">
+            <thead>
+              <tr className="text-slate-400 border-b border-slate-100">
+                <th className="text-left px-3 py-2 font-medium">Report ID</th>
+                <th className="text-left px-3 py-2 font-medium">Household</th>
+                <th className="text-left px-3 py-2 font-medium">Resident name</th>
+                <th className="text-left px-3 py-2 font-medium">Location</th>
+                <th className="text-left px-3 py-2 font-medium">Severity</th>
+                <th className="text-center px-3 py-2 font-medium">Contact back</th>
+                <th className="text-right px-3 py-2 font-medium">Reported</th>
+                <th className="text-center px-3 py-2 font-medium">Status</th>
+                <th className="text-center px-3 py-2 font-medium">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((r, i) => (
+                <tr
+                  key={r.id}
+                  onClick={() => setViewId(r.id)}
+                  className={`cursor-pointer ${i % 2 ? "bg-slate-50" : "bg-white"} hover:bg-sky-50`}
+                >
+                  <td className="px-3 py-1.5 text-slate-500">{r.id}</td>
+                  <td className="px-3 py-1.5 font-medium text-slate-700">{r.householdId}</td>
+                  <td className="px-3 py-1.5 text-slate-600">{r.name}</td>
+                  <td className="px-3 py-1.5 text-slate-600">{r.location}</td>
+                  <td className={`px-3 py-1.5 capitalize ${severityColor(r.severity)}`}>{r.severity}</td>
+                  <td className="px-3 py-1.5 text-center text-slate-500">{r.contactBack ? "Yes" : "No"}</td>
+                  <td className="px-3 py-1.5 text-right text-slate-400">{r.time}</td>
+                  <td className="px-3 py-1.5 text-center">
+                    {r.status === "Open" ? <Badge tone="bad">Open</Badge> : <Badge tone="good">Resolved</Badge>}
+                  </td>
+                  <td className="px-3 py-1.5 text-center">
+                    {r.status === "Open" ? (
+                      <Btn variant="ghost" onClick={(e) => { e.stopPropagation(); resolveLeakReport(r.id); }}>
+                        Resolve
+                      </Btn>
+                    ) : (
+                      <Btn variant="ghostMuted" onClick={(e) => { e.stopPropagation(); reopenLeakReport(r.id); }}>
+                        Reopen
+                      </Btn>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {filtered.length === 0 && (
+                <tr><td colSpan={9} className="text-center text-slate-400 py-6 text-xs">No leak reports match this filter.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {viewed && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setViewId(null)}
+        >
+          <div
+            className="bg-white rounded-2xl w-[420px] max-w-full overflow-hidden shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-slate-100 flex items-start justify-between">
+              <div>
+                <div className="text-[10px] text-slate-400 font-semibold uppercase tracking-wide">Leak report</div>
+                <div className="font-bold text-slate-800 text-lg">{viewed.id}</div>
+              </div>
+              <button onClick={() => setViewId(null)} className="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+            </div>
+
+            <div className="p-5">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <div className="font-semibold text-slate-800">{viewed.name}</div>
+                  <div className="text-xs text-slate-500">{viewed.householdId} · Standpost #{viewed.standpost}</div>
+                </div>
+                {viewed.status === "Open" ? <Badge tone="bad">Open</Badge> : <Badge tone="good">Resolved</Badge>}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-[13px] mb-3">
+                <div className="bg-slate-50 rounded-lg px-3 py-2">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Location</div>
+                  <div className="font-semibold text-slate-700">{viewed.location}</div>
+                </div>
+                <div className="bg-slate-50 rounded-lg px-3 py-2">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Severity</div>
+                  <div className={`font-semibold capitalize ${severityColor(viewed.severity)}`}>{viewed.severity}</div>
+                </div>
+                <div className="bg-slate-50 rounded-lg px-3 py-2">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Reported</div>
+                  <div className="font-semibold text-slate-700">{viewed.time}</div>
+                </div>
+                <div className="bg-slate-50 rounded-lg px-3 py-2">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Contact back requested</div>
+                  <div className="font-semibold text-slate-700">{viewed.contactBack ? "Yes" : "No"}</div>
+                </div>
+              </div>
+
+              <div className="bg-slate-50 rounded-lg px-3 py-2 text-[13px] mb-4">
+                <div className="text-[10px] text-slate-400 uppercase tracking-wide mb-1">Description</div>
+                <div className="text-slate-700">{viewed.description}</div>
+              </div>
+
+              <div className="flex gap-2 justify-end">
+                <Btn onClick={() => setViewId(null)}>Close</Btn>
+                {viewed.status === "Open" ? (
+                  <Btn variant="primary" onClick={() => { setViewId(null); resolveLeakReport(viewed.id); }}>Mark as Resolved</Btn>
+                ) : (
+                  <Btn variant="primary" onClick={() => { setViewId(null); reopenLeakReport(viewed.id); }}>Reopen</Btn>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // Freshness-based status for a household's flow-sensor device (thresholds
 // in src/deviceStatus.js, shared with the resident view).
 function DeviceStatusBadge({ household }) {
@@ -1320,167 +1395,6 @@ function PasswordResetRequestBanner({ household, onConfirmPasswordReset, showToa
   );
 }
 
-export function LeakReportsPage({ leakReports, resolveLeakReport, reopenLeakReport }) {
-  const [filter, setFilter] = useState("All");
-  const [viewId, setViewId] = useState(null);
-
-  const filters = ["All", "Open", "Resolved"];
-  const counts = {
-    All: leakReports.length,
-    Open: leakReports.filter((r) => r.status === "Open").length,
-    Resolved: leakReports.filter((r) => r.status === "Resolved").length,
-  };
-
-  const filtered = leakReports.filter((r) => filter === "All" || r.status === filter);
-  const viewed = viewId ? leakReports.find((r) => r.id === viewId) : null;
-
-  const severityColor = (s) =>
-    s === "major" ? "text-rose-600" : s === "moderate" ? "text-amber-600" : "text-slate-500";
-
-  return (
-    <>
-      <SectionHeader title="Resident Leak Reports" sub="Water leaks and pipe issues reported by residents" />
-
-      <div className="flex gap-1.5 mb-4 flex-wrap">
-        {filters.map((f) => (
-          <button
-            key={f}
-            onClick={() => setFilter(f)}
-            className={`text-[11px] font-medium px-2.5 py-1 rounded-full border transition ${
-              filter === f ? "bg-[#1e3a5f] text-white border-[#1e3a5f]" : "bg-white text-slate-600 border-slate-300 hover:bg-slate-50"
-            }`}
-          >
-            {f} ({counts[f]})
-          </button>
-        ))}
-      </div>
-
-      <div className="flex gap-3 flex-wrap mb-4">
-        <StatCard label="Total reports" value={counts.All} accent="border-t-slate-300" />
-        <StatCard label="Open" value={counts.Open} tone="bad" accent="border-t-rose-400" />
-        <StatCard label="Resolved" value={counts.Resolved} tone="good" accent="border-t-emerald-400" />
-      </div>
-
-      <div className="card-hover bg-white rounded-lg border border-slate-200 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-[12px] min-w-[720px]">
-            <thead>
-              <tr className="text-slate-400 border-b border-slate-100">
-                <th className="text-left px-3 py-2 font-medium">Report ID</th>
-                <th className="text-left px-3 py-2 font-medium">Household</th>
-                <th className="text-left px-3 py-2 font-medium">Resident name</th>
-                <th className="text-left px-3 py-2 font-medium">Location</th>
-                <th className="text-left px-3 py-2 font-medium">Severity</th>
-                <th className="text-center px-3 py-2 font-medium">Contact back</th>
-                <th className="text-right px-3 py-2 font-medium">Reported</th>
-                <th className="text-center px-3 py-2 font-medium">Status</th>
-                <th className="text-center px-3 py-2 font-medium">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((r, i) => (
-                <tr
-                  key={r.id}
-                  onClick={() => setViewId(r.id)}
-                  className={`cursor-pointer ${i % 2 ? "bg-slate-50" : "bg-white"} hover:bg-sky-50`}
-                >
-                  <td className="px-3 py-1.5 text-slate-500">{r.id}</td>
-                  <td className="px-3 py-1.5 font-medium text-slate-700">{r.householdId}</td>
-                  <td className="px-3 py-1.5 text-slate-600">{r.name}</td>
-                  <td className="px-3 py-1.5 text-slate-600">{r.location}</td>
-                  <td className={`px-3 py-1.5 capitalize ${severityColor(r.severity)}`}>{r.severity}</td>
-                  <td className="px-3 py-1.5 text-center text-slate-500">{r.contactBack ? "Yes" : "No"}</td>
-                  <td className="px-3 py-1.5 text-right text-slate-400">{r.time}</td>
-                  <td className="px-3 py-1.5 text-center">
-                    {r.status === "Open" ? <Badge tone="bad">Open</Badge> : <Badge tone="good">Resolved</Badge>}
-                  </td>
-                  <td className="px-3 py-1.5 text-center">
-                    {r.status === "Open" ? (
-                      <Btn variant="ghost" onClick={(e) => { e.stopPropagation(); resolveLeakReport(r.id); }}>
-                        Resolve
-                      </Btn>
-                    ) : (
-                      <Btn variant="ghostMuted" onClick={(e) => { e.stopPropagation(); reopenLeakReport(r.id); }}>
-                        Reopen
-                      </Btn>
-                    )}
-                  </td>
-                </tr>
-              ))}
-              {filtered.length === 0 && (
-                <tr><td colSpan={9} className="text-center text-slate-400 py-6 text-xs">No leak reports match this filter.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {viewed && (
-        <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
-          onClick={() => setViewId(null)}
-        >
-          <div
-            className="bg-white rounded-2xl w-[420px] max-w-full overflow-hidden shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="px-5 py-4 border-b border-slate-100 flex items-start justify-between">
-              <div>
-                <div className="text-[10px] text-slate-400 font-semibold uppercase tracking-wide">Leak report</div>
-                <div className="font-bold text-slate-800 text-lg">{viewed.id}</div>
-              </div>
-              <button onClick={() => setViewId(null)} className="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
-            </div>
-
-            <div className="p-5">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <div className="font-semibold text-slate-800">{viewed.name}</div>
-                  <div className="text-xs text-slate-500">{viewed.householdId} · Standpost #{viewed.standpost}</div>
-                </div>
-                {viewed.status === "Open" ? <Badge tone="bad">Open</Badge> : <Badge tone="good">Resolved</Badge>}
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 text-[13px] mb-3">
-                <div className="bg-slate-50 rounded-lg px-3 py-2">
-                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Location</div>
-                  <div className="font-semibold text-slate-700">{viewed.location}</div>
-                </div>
-                <div className="bg-slate-50 rounded-lg px-3 py-2">
-                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Severity</div>
-                  <div className={`font-semibold capitalize ${severityColor(viewed.severity)}`}>{viewed.severity}</div>
-                </div>
-                <div className="bg-slate-50 rounded-lg px-3 py-2">
-                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Reported</div>
-                  <div className="font-semibold text-slate-700">{viewed.time}</div>
-                </div>
-                <div className="bg-slate-50 rounded-lg px-3 py-2">
-                  <div className="text-[10px] text-slate-400 uppercase tracking-wide">Contact back requested</div>
-                  <div className="font-semibold text-slate-700">{viewed.contactBack ? "Yes" : "No"}</div>
-                </div>
-              </div>
-
-              <div className="bg-slate-50 rounded-lg px-3 py-2 text-[13px] mb-4">
-                <div className="text-[10px] text-slate-400 uppercase tracking-wide mb-1">Description</div>
-                <div className="text-slate-700">{viewed.description}</div>
-              </div>
-
-              <div className="flex gap-2 justify-end">
-                <Btn onClick={() => setViewId(null)}>Close</Btn>
-                {viewed.status === "Open" ? (
-                  <Btn variant="primary" onClick={() => { setViewId(null); resolveLeakReport(viewed.id); }}>Mark as Resolved</Btn>
-                ) : (
-                  <Btn variant="primary" onClick={() => { setViewId(null); reopenLeakReport(viewed.id); }}>Reopen</Btn>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
-
 export function HouseholdsPage({
   households,
   showToast,
@@ -1495,7 +1409,6 @@ export function HouseholdsPage({
   const [expandedId, setExpandedId] = React.useState(null);
   const [selectedPurok, setSelectedPurok] = React.useState("All Puroks");
   const [showAddModal, setShowAddModal] = React.useState(false);
-  const [manualReadingHouseholdId, setManualReadingHouseholdId] = React.useState(null);
 
   // DeviceStatusBadge reads Date.now() at render time, so without new data
   // arriving (a fresh reading, a page action) it would never notice a device
@@ -1579,27 +1492,15 @@ export function HouseholdsPage({
         />
       )}
 
-      {manualReadingHouseholdId && (
-        <ManualReadingModal
-          household={households.find((h) => h.id === manualReadingHouseholdId)}
-          showToast={showToast}
-          onClose={() => setManualReadingHouseholdId(null)}
-          onSuccess={() => {
-            setManualReadingHouseholdId(null);
-            // Note: in a real app, would trigger a refresh of household data
-          }}
-        />
-      )}
-
       {filtered.length > 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="columns-1 sm:columns-2 gap-3">
           {filtered.map((h) => {
             const isExpanded = expandedId === h.id;
             const isDimmed = expandedId !== null && !isExpanded;
             return (
               <div
                 key={h.id}
-                className={`card-hover bg-white rounded-lg border p-3.5 cursor-pointer motion-safe:hover:-translate-y-0.5 transition-all duration-200 ${
+                className={`card-hover bg-white rounded-lg border p-3.5 mb-3 break-inside-avoid-column cursor-pointer motion-safe:hover:-translate-y-0.5 transition-all duration-200 ${
                   isExpanded
                     ? "border-slate-800 ring-2 ring-slate-300 shadow-[0_0_16px_rgba(0,0,0,0.35)]"
                     : isDimmed
@@ -1628,7 +1529,7 @@ export function HouseholdsPage({
                 </button>
 
                 {isExpanded && (
-                  <div className="mt-3 pt-3 border-t border-slate-200 text-[13px] space-y-3">
+                  <div className="mt-3 pt-3 border-t border-slate-100 text-[13px] text-slate-600 space-y-2.5">
                     {h.passwordResetRequested && (
                       <PasswordResetRequestBanner
                         household={h}
@@ -1636,89 +1537,82 @@ export function HouseholdsPage({
                         showToast={showToast}
                       />
                     )}
-
-                    {/* Live Flow */}
                     {(() => {
+                      // An offline sensor's last flow value is stale, not
+                      // "live" — show it only while the device is reporting.
                       const online = isDeviceOnline(h);
                       const flowing = online && (h.lastFlow || 0) > 0;
                       const isHighFlow = online && h.flowType === "High flow";
                       return (
-                        <div className={`rounded-lg px-3 py-2 ${isHighFlow ? "bg-amber-50" : flowing ? "bg-sky-50" : "bg-slate-50"}`}>
-                          <div className="flex justify-between items-center">
-                            <span className="text-slate-500 font-medium">Flow Rate</span>
-                            {online ? (
-                              <span className={`font-bold ${isHighFlow ? "text-amber-700" : flowing ? "text-sky-700" : "text-slate-600"}`}>
-                                {(h.lastFlow || 0).toFixed(1)} L/min {isHighFlow && <span className="text-xs text-amber-600">High flow</span>}
-                              </span>
-                            ) : (
-                              <span className="text-xs text-slate-400">
-                                {!h.deviceProvisioned ? "Not connected" : h.deviceLastSeen ? "Offline" : "Awaiting"}
-                              </span>
-                            )}
-                          </div>
+                        <div
+                          className={`flex items-center justify-between rounded-lg px-3 py-2 ${
+                            isHighFlow ? "bg-amber-50" : flowing ? "bg-sky-50" : "bg-slate-50"
+                          }`}
+                        >
+                          <span className="text-slate-500 font-medium">Live flow</span>
+                          {online ? (
+                            <span className={`text-xl font-bold ${isHighFlow ? "text-amber-700" : flowing ? "text-sky-700" : "text-slate-600"}`}>
+                              {(h.lastFlow || 0).toFixed(1)} <span className="text-xs font-medium">L/min</span>
+                              {isHighFlow && <span className="ml-1.5 text-xs font-semibold text-amber-600">High flow</span>}
+                            </span>
+                          ) : (
+                            <span className="text-[13px] font-medium text-slate-400">
+                              {!h.deviceProvisioned
+                                ? "No sensor connected"
+                                : h.deviceLastSeen
+                                ? "— Sensor offline"
+                                : "Awaiting first reading"}
+                            </span>
+                          )}
                         </div>
                       );
                     })()}
-
-                    {/* Readings & Billing - Compact Grid */}
-                    <div className="grid grid-cols-4 gap-2 bg-slate-50 rounded-lg p-2">
-                      <div className="text-center">
-                        <div className="text-slate-500 text-xs">Current</div>
-                        <div className="font-semibold text-slate-800 text-sm">{h.currCm3} CM³</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-slate-500 text-xs">Previous</div>
-                        <div className="font-semibold text-slate-800 text-sm">{h.prevCm3} CM³</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-slate-500 text-xs">Usage</div>
-                        <div className="font-semibold text-slate-800 text-sm">{h.consumption} CM³</div>
-                      </div>
-                      <div className="text-center border-l border-slate-200 pl-2">
-                        <div className="text-slate-500 text-xs">Due</div>
-                        <div className="font-semibold text-slate-800 text-sm">{peso(h.totalDue)}</div>
-                      </div>
+                    {isDeviceOnline(h) && <PerSecondUsageChart liters={h.perSecondLiters || []} />}
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>Current reading: <span className="font-semibold text-slate-800">{h.currCm3} CM³</span></div>
+                      <div>Previous reading: <span className="font-semibold text-slate-800">{h.prevCm3} CM³</span></div>
+                      <div>This cycle: <span className="font-semibold text-slate-800">{h.consumption} CM³</span></div>
+                      <div>Amount due: <span className="font-semibold text-slate-800">{peso(h.amount)}</span></div>
+                      <div>Total due: <span className="font-semibold text-slate-800">{peso(h.totalDue)}</span></div>
                     </div>
-
-                    {/* Manual Entry */}
-                    <Btn variant="outline" onClick={() => setManualReadingHouseholdId(h.id)} className="w-full text-sm">
-                      Manual meter entry
-                    </Btn>
-
-                    {/* Status Grid */}
-                    <div className="grid grid-cols-3 gap-2">
-                      <div className="bg-slate-50 rounded p-2">
-                        <div className="text-slate-500 text-xs mb-0.5">Payment</div>
-                        <Badge tone={h.paymentStatus === "Paid" ? "good" : h.paymentStatus?.includes("Pending") ? "warn" : "bad"}>
-                          {h.paymentStatus === "Paid" ? "Paid" : h.paymentStatus?.replace(" ", "\n") || "Unpaid"}
-                        </Badge>
-                      </div>
-                      <div className="bg-slate-50 rounded p-2">
-                        <div className="text-slate-500 text-xs mb-0.5">Account</div>
-                        <span className={`text-xs font-semibold ${h.password ? "text-emerald-600" : "text-amber-600"}`}>
-                          {h.password ? "Active" : "Setup"}
-                        </span>
-                      </div>
-                      <div className="bg-slate-50 rounded p-2 flex flex-col justify-center">
-                        {h.password ? (
-                          <Btn variant="outline" size="sm" onClick={() => {
-                            if (typeof onResetPassword === "function") onResetPassword(h.id);
-                            else if (typeof showToast === "function") showToast(`${h.id} password reset`, "info");
-                          }} className="text-xs">
-                            Reset
-                          </Btn>
+                    <div className="flex items-center justify-between pt-1">
+                      <span>
+                        Payment status:{" "}
+                        {h.paymentStatus === "Paid" ? (
+                          <Badge tone="good">Paid</Badge>
+                        ) : h.paymentStatus === "GCash Pending" ? (
+                          <Badge tone="info">GCash Pending</Badge>
+                        ) : h.paymentStatus === "Cash Pending" ? (
+                          <Badge tone="warn">Cash Pending</Badge>
                         ) : (
-                          <Btn variant="primary" size="sm" onClick={() => {
-                            if (typeof onResetPassword === "function") onResetPassword(h.id);
-                            else if (typeof showToast === "function") showToast(`${h.id} account activated`, "info");
-                          }} className="text-xs">
-                            Activate
-                          </Btn>
+                          <Badge tone="bad">Unpaid</Badge>
                         )}
-                      </div>
+                      </span>
+                      <span>
+                        Account: {h.password ? (
+                          <span className="text-emerald-600 font-medium">Password set</span>
+                        ) : (
+                          <span className="text-amber-600 font-medium">Not yet activated</span>
+                        )}
+                      </span>
                     </div>
+                    {h.password && (
+                      <div className="pt-1">
+                        <Btn
+                          variant="outline"
+                          onClick={() => {
+                            if (typeof onResetPassword === "function") {
+                              onResetPassword(h.id);
+                            } else if (typeof showToast === "function") {
+                              showToast(`${h.id} password reset — resident must set a new one on next login.`, "info");
+                            }
+                          }}
+                        >
+                          Reset password
+                        </Btn>
+                      </div>
+                    )}
 
-                    {/* Device Section */}
                     <DeviceManager
                       household={h}
                       onProvisionDevice={onProvisionDevice}
@@ -1896,97 +1790,6 @@ function AddHouseholdModal({ onAdd, showToast, onClose }) {
               disabled={submitting}
             >
               {submitting ? "Adding…" : "Add Household"}
-            </Btn>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-function ManualReadingModal({ household, showToast, onClose, onSuccess }) {
-  const [cm3, setCm3] = React.useState("");
-  const [submitting, setSubmitting] = React.useState(false);
-  const [error, setError] = React.useState("");
-
-  if (!household) return null;
-
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setError("");
-    const reading = Number(cm3);
-
-    if (!Number.isFinite(reading) || reading < 0) {
-      setError("Please enter a valid meter reading (CM³).");
-      return;
-    }
-
-    if (reading < household.prevCm3) {
-      setError("Meter reading cannot be lower than the previous reading.");
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      await submitManualReading(household.id, reading);
-      showToast?.(`Manual reading recorded for ${household.id} — ${reading} CM³`, "success");
-      onSuccess?.();
-    } catch (err) {
-      setError(err.message || "Could not record reading.");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
-        <div className="bg-[#1e3a5f] text-white px-5 py-4 flex items-center justify-between">
-          <div className="font-bold">Manual Meter Reading</div>
-          <button onClick={onClose} className="text-white/80 hover:text-white text-lg leading-none">×</button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="p-5 space-y-3">
-          <div className="bg-slate-50 rounded-lg px-3 py-2 text-[12px]">
-            <div className="text-slate-500 mb-0.5">Household</div>
-            <div className="font-semibold text-slate-800">{household.id} — {household.name}</div>
-            <div className="text-slate-600 text-[11px]">Meter: {household.meter}</div>
-          </div>
-
-          <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-[11px] text-blue-700">
-            Previous reading: <span className="font-semibold">{household.prevCm3} CM³</span>
-          </div>
-
-          {error && (
-            <div className="bg-rose-50 border border-rose-200 rounded-md px-3 py-2 text-[11px] text-rose-700">
-              {error}
-            </div>
-          )}
-
-          <div>
-            <label className="text-[11px] font-medium text-slate-600 block mb-1">
-              Current meter reading (CM³) <span className="text-rose-500">*</span>
-            </label>
-            <input
-              type="number"
-              min="0"
-              step="0.01"
-              value={cm3}
-              onChange={(e) => setCm3(e.target.value)}
-              className="w-full border border-slate-300 rounded-md px-2.5 py-1.5 text-[12px] focus:outline-none focus:border-sky-400"
-              placeholder={`e.g., ${household.prevCm3 + 100}`}
-              autoFocus
-            />
-          </div>
-
-          <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[10px] text-amber-700">
-            ⚠️ This reading will be recorded as "manual" and logged in the audit trail.
-          </div>
-
-          <div className="flex gap-2 pt-2">
-            <Btn type="button" className="flex-1" onClick={onClose}>Cancel</Btn>
-            <Btn type="submit" variant="primary" className="flex-1" disabled={submitting}>
-              {submitting ? "Recording…" : "Record reading"}
             </Btn>
           </div>
         </form>

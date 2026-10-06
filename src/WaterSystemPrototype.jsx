@@ -67,24 +67,8 @@ export default function WaterSystemPrototype() {
   const [activeResidentId, setActiveResidentId] = useState(residentSession?.householdId || null);
 
   const [toast, setToast] = useState(null);
-  const [adminPage, setAdminPageState] = useState(() => {
-    if (!adminSession) return "login";
-    return localStorage.getItem("adminPage") || "dashboard";
-  });
-  const [residentPage, setResidentPageState] = useState(() => {
-    if (!residentSession) return "login";
-    return localStorage.getItem("residentPage") || "dashboard";
-  });
-
-  const setAdminPage = (page) => {
-    setAdminPageState(page);
-    localStorage.setItem("adminPage", page);
-  };
-
-  const setResidentPage = (page) => {
-    setResidentPageState(page);
-    localStorage.setItem("residentPage", page);
-  };
+  const [adminPage, setAdminPage] = useState(adminSession ? "dashboard" : "login");
+  const [residentPage, setResidentPage] = useState(residentSession ? "dashboard" : "login");
   const [alertFilter, setAlertFilter] = useState("All");
   const [selectedAlertId, setSelectedAlertId] = useState(null);
   const [paymentModal, setPaymentModal] = useState(null);
@@ -646,30 +630,21 @@ export default function WaterSystemPrototype() {
     };
   }, [residentAuthenticated]); // eslint-disable-line
 
-  async function handleGenerateBills(period, force, onMessage) {
+  async function handleGenerateBills(period) {
     if (!USE_API) {
-      if (onMessage) onMessage("Bill generation requires the backend to be running.");
-      else showToast("Bill generation requires the backend to be running.", "warn");
+      showToast("Bill generation requires the backend to be running.", "warn");
       return;
     }
     try {
-      const result = await generateBills(period, force);
+      const result = await generateBills(period);
       await loadFromAPI(true);
-      const msg = force
-        ? `Recalculated ${result.created} new and updated ${result.updated} existing bills for ${period} with tiered pricing.`
-        : `Generated ${result.created} bill(s) for ${period}${result.skipped ? ` — ${result.skipped} already billed` : "."}`;
-      if (onMessage) {
-        onMessage(msg);
-      } else {
-        showToast(msg, "success");
-      }
+      showToast(
+        `Generated ${result.created} bill(s) for ${period}` +
+          (result.skipped ? ` — ${result.skipped} household(s) already billed for this period.` : "."),
+        "success"
+      );
     } catch (err) {
-      const errMsg = "Could not generate bills: " + err.message;
-      if (onMessage) {
-        onMessage(errMsg);
-      } else {
-        showToast(errMsg, "warn");
-      }
+      showToast("Could not generate bills: " + err.message, "warn");
     }
   }
 
@@ -846,10 +821,8 @@ export default function WaterSystemPrototype() {
     showToast("Leak report reopened", "success");
   }
 
-  // ── Payment (GCash or Cash) ─────────────────────────────────────
-  // method: "gcash" (default, PayMongo checkout) or "cash" (declares intent
-  // to pay in person — see confirmGcashPayment's "cash" branch below).
-  function startGcashPayment(id, method = "gcash") {
+  // ── GCash QR payment ────────────────────────────────────────────
+  function startGcashPayment(id) {
     setPaymentModal(id);
     setPaymentStep("confirm");
   }

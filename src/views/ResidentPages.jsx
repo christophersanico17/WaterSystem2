@@ -951,7 +951,7 @@ export function ResidentDashboard({ me, setPage, alerts = [] }) {
           <tbody>
             {me.history.map((rec, i) => {
               const isLast = i === me.history.length - 1;
-              const status = isLast ? me.paymentStatus : rec.paid ? "Paid" : "Unpaid";
+              const status = isLast ? me.paymentStatus : "Paid";
               return (
                 <tr key={rec.period} className={i % 2 ? "bg-slate-50" : "bg-white"}>
                   <td className="px-3 py-1.5 font-medium text-slate-700">{rec.period}</td>
@@ -996,11 +996,11 @@ export function ResidentBills({ me, setPage, startGcashPayment }) {
         label: rec.period,
         tag: isLatest ? "Current" : null,
         dueDate: isLatest ? formatDueDate(dueDateForPeriod(rec.period)) : null,
-        paidDate: !isLatest && rec.paid
+        paidDate: !isLatest
           ? `${rec.period.split(" ")[0].slice(0, 3)} ${parseInt(rec.period.split(" ")[0]) || 20}, ${rec.period.split(" ")[1]}`
           : null,
         amount: rec.amt,
-        paid: isLatest ? me.paymentStatus === "Paid" : Boolean(rec.paid),
+        paid: !isLatest || me.paymentStatus === "Paid",
         rec,
         consumed,
       };
@@ -1064,11 +1064,6 @@ export function ResidentBills({ me, setPage, startGcashPayment }) {
                           Paid
                         </span>
                       )}
-                      {!period.paid && !period.tag && (
-                        <span className="text-[10px] bg-rose-50 text-rose-700 font-semibold px-1.5 py-0.5 rounded">
-                          Unpaid
-                        </span>
-                      )}
                     </div>
                     {period.dueDate && !period.paid && (
                       <div className="text-[11px] text-rose-500 font-medium">
@@ -1078,7 +1073,7 @@ export function ResidentBills({ me, setPage, startGcashPayment }) {
                     {period.paid && period.tag && (
                       <div className="text-[11px] text-emerald-600 font-medium">Paid</div>
                     )}
-                    {!period.tag && period.paid && (
+                    {!period.tag && (
                       <div className="text-[11px] text-slate-400">
                         Paid on {period.label.split(" ")[0].slice(0, 3)} 20,{" "}
                         {period.label.split(" ")[1]}
@@ -1325,8 +1320,8 @@ export function ResidentPayments({ me, startGcashPayment }) {
           <tbody>
             {me.history.map((rec, i) => {
               const isLast = i === me.history.length - 1;
-              const status = isLast ? me.paymentStatus : rec.paid ? "Paid" : "Unpaid";
-              const method = isLast ? me.paymentMethod : rec.method;
+              const status = isLast ? me.paymentStatus : "Paid";
+              const method = isLast ? me.paymentMethod : i % 2 === 0 ? "GCash" : "Cash";
               return (
                 <tr key={rec.period} className={i % 2 ? "bg-slate-50" : "bg-white"}>
                   <td className="px-3 py-2 font-medium text-slate-700">{rec.period}</td>
