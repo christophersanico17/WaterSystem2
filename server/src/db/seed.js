@@ -33,6 +33,10 @@ function sqliteNow(offsetMs = 0) {
   return new Date(Date.now() + offsetMs).toISOString().slice(0, 19).replace("T", " ");
 }
 
+function billingPeriod(date) {
+  return `${date.toLocaleString("en-US", { month: "short" })} ${date.getFullYear()}`;
+}
+
 function seed() {
   const existing = db.prepare("SELECT COUNT(*) AS n FROM households").get();
   if (existing.n > 0) {
@@ -82,12 +86,17 @@ function seed() {
       last_name: "Officer",
     });
 
-    const historyTemplate = [
-      { period: "Jan 2026", prev: 20, curr: 28, amt: 200 },
-      { period: "Feb 2026", prev: 28, curr: 44, amt: 320 },
-      { period: "Mar 2026", prev: 44, curr: 50, amt: 200 },
-      { period: "Apr 2026", prev: 50, curr: 53, amt: 200 },
-    ];
+    const today = new Date();
+    const currentPeriod = billingPeriod(today);
+    const historyTemplate = Array.from({ length: 4 }, (_, index) => {
+      const date = new Date(today.getFullYear(), today.getMonth() - 4 + index, 1);
+      return {
+        period: billingPeriod(date),
+        prev: [20, 28, 44, 50][index],
+        curr: [28, 44, 50, 53][index],
+        amt: [200, 320, 200, 200][index],
+      };
+    });
 
     seedHouseholds.forEach((h, i) => {
       const purok = (h.standpost % 9) || 5;
@@ -121,7 +130,7 @@ function seed() {
         });
       });
 
-      // Current period (May 2026) — randomized like the original mock
+      // Current period — randomized like the original mock
       const prev = 10 + i * 4 + Math.floor(Math.random() * 6);
       const current = prev + 8 + Math.floor(Math.random() * 22);
       const consumption = current - prev;
@@ -132,7 +141,7 @@ function seed() {
 
       insertBill.run({
         household_id: h.id,
-        period: "May 2026",
+        period: currentPeriod,
         prev_cm3: prev,
         curr_cm3: current,
         amount,

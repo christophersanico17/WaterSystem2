@@ -22,14 +22,24 @@ const MONTHS = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
 ];
+const PUROK_GROUPS = ["Purok 1", "Purok 2", "Purok 2A", "Purok 3", "Purok 4", "Purok 5", "Purok 6", "Purok 7"];
 
+function householdPurok(household) {
+  const address = String(household.purok || household.address || "");
+  const match = address.match(/\bpurok[\s-]*(2a|[1-7])\b/i);
+  if (match) return `Purok ${match[1].toUpperCase()}`;
+
+  const inferredPurok = Number(household.standpost) % 9 || 5;
+  const inferredGroup = `Purok ${inferredPurok}`;
+  return PUROK_GROUPS.includes(inferredGroup) ? inferredGroup : "Other";
+}
 export function DashboardPage({ households, alerts, unpaidCount, setPage }) {
   const recentAlerts = alerts.slice(0, 5);
   const goto = (p) => { if (typeof setPage === "function") setPage(p); };
 
   // The date the dashboard is "viewing". Defaults to the configured billing
   // period (e.g. "May 2026") so the chart lines up with the billing summary.
-  const [bpMonth, bpYear] = BILLING_PERIOD.replace(/^Month of\s+/i, "").split(" ");
+  const [bpMonth, bpYear] = ["May", "2026"];
   const today = new Date();
   const [month, setMonth] = useState(Math.max(0, MONTHS.indexOf(bpMonth))); // 0–11
   const [year, setYear] = useState(Number(bpYear) || today.getFullYear());
@@ -38,6 +48,8 @@ export function DashboardPage({ households, alerts, unpaidCount, setPage }) {
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const safeDay = Math.min(day, daysInMonth);
   const periodLabel = `${MONTHS[month]} ${year}`;
+  const currentPeriodLabel = `${MONTHS[today.getMonth()]} ${today.getFullYear()}`;
+  const currentMonthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
   const displayDate = new Date(year, month, safeDay).toLocaleDateString("en-PH", {
     year: "numeric", month: "long", day: "numeric",
   });
@@ -52,14 +64,29 @@ export function DashboardPage({ households, alerts, unpaidCount, setPage }) {
   ])].sort((a, b) => a - b);
 
   // Consumption for the selected period, pulled from each household's billing
-  // history. Households with no bill for that period are shown as 0.
+  // history. For the current month, prefer a fresh meter reading over the
+  // bill snapshot so consumption keeps updating through the month.
   const withUsage = households.map((h) => {
     const rec = (h.history || []).find((r) => r.period === periodLabel);
+    const previousPeriodRecord = (h.history || []).filter((r) => r.period !== currentPeriodLabel).at(-1);
+    const currentPeriodBaseline = rec?.prev ?? previousPeriodRecord?.curr;
+    const hasCurrentMonthReading =
+      periodLabel === currentPeriodLabel &&
+      String(h.lastReadingAt || "").slice(0, 7) === currentMonthKey &&
+      Number.isFinite(Number(h.currCm3)) &&
+      Number.isFinite(Number(currentPeriodBaseline));
+    const hasRealData = Boolean(rec || hasCurrentMonthReading);
+    const periodUsage = hasCurrentMonthReading
+      ? Math.max(0, Number(h.currCm3) - Number(currentPeriodBaseline))
+      : rec
+      ? Math.max(0, rec.curr - rec.prev)
+      : 0;
     return {
       ...h,
       rec,
-      periodUsage: rec ? Math.max(0, rec.curr - rec.prev) : 0,
-      hasData: !!rec,
+      periodUsage,
+      hasData: hasRealData,
+      hasBillData: Boolean(rec),
       // Only the latest billing period carries a live paid/unpaid status; older
       // periods are treated as settled (same convention as the resident view).
       isLatestPeriod: periodLabel === h.period,
@@ -68,7 +95,7 @@ export function DashboardPage({ households, alerts, unpaidCount, setPage }) {
   const top10 = [...withUsage].sort((a, b) => b.periodUsage - a.periodUsage).slice(0, 10);
   const maxUsage = Math.max(...top10.map((h) => h.periodUsage), 1);
   const anyData = withUsage.some((h) => h.hasData);
-  const billingRows = withUsage.filter((h) => h.hasData).slice(0, 6);
+  const billingRows = withUsage.filter((h) => h.hasBillData).slice(0, 6);
 
   const selectCls =
     "border border-slate-300 rounded-lg px-2.5 py-1.5 text-[12px] bg-white text-slate-700 focus:outline-none focus:border-[#1e3a5f] focus:ring-1 focus:ring-[#1e3a5f]";
@@ -224,7 +251,7 @@ export function DashboardPage({ households, alerts, unpaidCount, setPage }) {
 export function ConsumptionPage({ households }) {
   // Period selector — mirrors the dashboard's, scoped to month + year since
   // consumption is a monthly figure.
-  const [bpMonth, bpYear] = BILLING_PERIOD.replace(/^Month of\s+/i, "").split(" ");
+  const [bpMonth, bpYear] = ["May", "2026"];
   const today = new Date();
   const [month, setMonth] = useState(Math.max(0, MONTHS.indexOf(bpMonth)));
   const [year, setYear] = useState(Number(bpYear) || today.getFullYear());
@@ -326,21 +353,46 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
   const [statusFilter, setStatusFilter] = React.useState("All");
   // { action: "paid" | "unpaid", id, name, amt } while a confirmation is pending.
   const [confirmPay, setConfirmPay] = React.useState(null);
+  const [verifyGcash, setVerifyGcash] = React.useState(null);
+  const [adminReference, setAdminReference] = React.useState("");
   // Method picked in the "Mark paid" modal — "Offline" (cash) or "GCash"
   // (manually recording a GCash payment received outside the automatic flow).
   const [payMethod, setPayMethod] = React.useState("Offline");
 
-  function confirmPayment() {
+  async function confirmPayment() {
     if (!confirmPay) return;
     const { id, action } = confirmPay;
     setConfirmPay(null);
     if (action === "unpaid") {
       markUnpaid(id);
     } else {
-      markPaid(id, payMethod);
-      showToast(`${id} marked as paid (${payMethod === "GCash" ? "GCash" : "Cash"})`, "success");
+      const marked = await markPaid(id, payMethod);
+      if (marked) showToast(`${id} marked as paid (${payMethod === "GCash" ? "GCash" : "Cash"})`, "success");
     }
     setPayMethod("Offline");
+  }
+
+  function openManualGcashVerification() {
+    if (!confirmPay) return;
+    const { id, name, amt } = confirmPay;
+    setConfirmPay(null);
+    setPayMethod("Offline");
+    setAdminReference("");
+    setVerifyGcash({ id, name, amount: amt, mode: "manual" });
+  }
+
+  async function confirmGcashReference() {
+    if (!verifyGcash) return;
+    const confirmed = verifyGcash.mode === "manual"
+      ? await markPaid(verifyGcash.id, "GCash", undefined, adminReference)
+      : await receiveGcashPayment(verifyGcash.id, adminReference);
+    if (confirmed) {
+      if (verifyGcash.mode === "manual") {
+        showToast(`${verifyGcash.id} GCash payment verified and recorded`, "success");
+      }
+      setVerifyGcash(null);
+      setAdminReference("");
+    }
   }
   const monthOptions = [
     "All months",
@@ -372,14 +424,8 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
     November: "Nov",
     December: "Dec",
   };
-  const [selectedBillingMonth, setSelectedBillingMonth] = React.useState(() => {
-    const match = BILLING_PERIOD.match(/Month of\s+(\w+)\s+(\d{4})/);
-    return match ? match[1] : "May";
-  });
-  const [selectedBillingYear, setSelectedBillingYear] = React.useState(() => {
-    const match = BILLING_PERIOD.match(/Month of\s+(\w+)\s+(\d{4})/);
-    return match ? match[2] : "2026";
-  });
+  const [selectedBillingMonth, setSelectedBillingMonth] = React.useState("May");
+  const [selectedBillingYear, setSelectedBillingYear] = React.useState("2026");
   const selectedPeriodLabel =
     selectedBillingMonth === "All months"
       ? selectedBillingYear === "All years"
@@ -543,6 +589,7 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
               <th className="text-right px-3 py-2 font-semibold whitespace-nowrap">Consumed</th>
               <th className="text-right px-3 py-2 font-semibold whitespace-nowrap">Total Amt</th>
               <th className="text-left px-3 py-2 font-semibold whitespace-nowrap">Method</th>
+              <th className="text-left px-3 py-2 font-semibold whitespace-nowrap">GCash reference</th>
               <th className="text-center px-3 py-2 font-semibold whitespace-nowrap">Status</th>
               <th className="text-center px-3 py-2 font-semibold whitespace-nowrap no-print">Action</th>
             </tr>
@@ -569,6 +616,13 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
                       ? "Cash"
                       : "Pending"}
                   </td>
+                  <td className="px-3 py-1.5 text-left text-slate-700 whitespace-nowrap font-mono">
+                    {household.paymentStatus === "Paid" &&
+                    household.paymentMethod === "GCash" &&
+                    record.period === household.period
+                      ? household.paymentReference || "—"
+                      : "—"}
+                  </td>
                   <td className="px-3 py-1.5 text-center whitespace-nowrap">
                     {household.paymentStatus === "Paid" ? (
                       <Badge tone="good">Paid</Badge>
@@ -589,10 +643,19 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
                       <Btn
                         variant="primary"
                         onClick={() => {
-                          receiveGcashPayment(household.id);
+                          if (!household.paymentReference) {
+                            receiveGcashPayment(household.id);
+                            return;
+                          }
+                          setAdminReference("");
+                          setVerifyGcash({
+                            id: household.id,
+                            name: household.name,
+                            amount: household.totalDue,
+                          });
                         }}
                       >
-                        Confirm GCash
+                        {household.paymentReference ? "Verify GCash reference" : "Confirm GCash"}
                       </Btn>
                     ) : household.paymentStatus === "Cash Pending" ? (
                       <Btn
@@ -619,7 +682,7 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
               ))
             ) : (
               <tr>
-                <td colSpan={12} className="px-3 py-6 text-center text-slate-500">No records found for {selectedBillingMonth} {selectedBillingYear}.</td>
+                <td colSpan={13} className="px-3 py-6 text-center text-slate-500">No records found for {selectedBillingMonth} {selectedBillingYear}.</td>
               </tr>
             )}
           </tbody>
@@ -633,6 +696,61 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
         <br />
         CC CM² = Current Consumed CM²  |  TCCM² = Total Cumulative Meter Reading  |  PC CM² = Previous Consumed CM²
       </div>
+
+      {verifyGcash && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <form
+            className="bg-white rounded-xl w-full max-w-md overflow-hidden shadow-2xl"
+            onSubmit={(event) => {
+              event.preventDefault();
+              confirmGcashReference();
+            }}
+          >
+            <div className="px-5 py-4 border-b border-slate-100">
+              <h2 className="font-bold text-slate-800">Verify GCash payment</h2>
+              <p className="text-xs text-slate-500 mt-1">
+                {verifyGcash.mode === "manual"
+                  ? "Enter the reference from the GCash transaction you verified. It will be recorded with this payment."
+                  : "Enter the reference from your GCash transaction. The payment is confirmed only if it matches the resident's submission."}
+              </p>
+            </div>
+            <div className="p-5 text-sm text-slate-600 space-y-3">
+              <div className="flex justify-between gap-4">
+                <span>Household</span>
+                <span className="font-semibold text-slate-800">{verifyGcash.id} — {verifyGcash.name}</span>
+              </div>
+              <div className="flex justify-between gap-4">
+                <span>Amount</span>
+                <span className="font-semibold text-slate-800">{peso(verifyGcash.amount)}</span>
+              </div>
+              <label className="block">
+                <span className="block text-xs font-semibold text-slate-500 mb-1">Reference from GCash transaction record</span>
+                <input
+                  value={adminReference}
+                  onChange={(event) => setAdminReference(event.target.value.replace(/\D/g, ""))}
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={80}
+                  required
+                  autoComplete="off"
+                  className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  placeholder="Enter the verified reference"
+                />
+              </label>
+              <div className="flex justify-end gap-2 pt-1">
+                <Btn type="button" onClick={() => setVerifyGcash(null)}>Cancel</Btn>
+                <button
+                  type="submit"
+                  disabled={!adminReference.trim()}
+                  className="bg-[#0072CE] hover:bg-[#005ea3] text-white text-xs font-semibold px-3 py-2 rounded-md disabled:opacity-50"
+                >
+                  {verifyGcash.mode === "manual" ? "Record verified payment" : "Confirm verified payment"}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
 
       {confirmPay && (
         <div
@@ -672,7 +790,7 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
                     </button>
                     <button
                       type="button"
-                      onClick={() => setPayMethod("GCash")}
+                      onClick={openManualGcashVerification}
                       className={`flex-1 text-[12px] font-semibold py-2 rounded-lg border transition ${
                         payMethod === "GCash"
                           ? "bg-[#0072CE] border-[#0072CE] text-white"
@@ -1289,6 +1407,7 @@ export function HouseholdsPage({
 }) {
   const [searchTerm, setSearchTerm] = React.useState("");
   const [expandedId, setExpandedId] = React.useState(null);
+  const [selectedPurok, setSelectedPurok] = React.useState("All Puroks");
   const [showAddModal, setShowAddModal] = React.useState(false);
 
   // DeviceStatusBadge reads Date.now() at render time, so without new data
@@ -1301,13 +1420,19 @@ export function HouseholdsPage({
     return () => clearInterval(id);
   }, []);
 
-  const filtered = households.filter(
+  const searchFiltered = households.filter(
     (h) =>
       h.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
       h.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       String(h.standpost).includes(searchTerm) ||
-      h.meter.toLowerCase().includes(searchTerm.toLowerCase())
+      h.meter.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      householdPurok(h).toLowerCase().includes(searchTerm.toLowerCase())
   );
+  const filtered = searchFiltered.filter((household) =>
+    selectedPurok === "All Puroks" || householdPurok(household) === selectedPurok
+  );
+  const purokOptions = ["All Puroks", ...PUROK_GROUPS];
+  if (households.some((household) => householdPurok(household) === "Other")) purokOptions.push("Other");
 
   return (
     <>
@@ -1325,10 +1450,39 @@ export function HouseholdsPage({
           />
         </div>
         <div className="text-xs text-slate-500">
-          {searchTerm ? `${filtered.length} of ${households.length} households` : `${households.length} total households`}
+          {searchTerm || selectedPurok !== "All Puroks"
+            ? `${filtered.length} of ${households.length} households`
+            : `${households.length} total households`}
         </div>
         <Btn variant="primary" onClick={() => setShowAddModal(true)}>+ Add Household</Btn>
       </div>
+
+      <div className="flex flex-wrap items-center gap-2 mb-4" aria-label="Filter households by Purok">
+        <span className="text-xs font-semibold text-slate-500 mr-1">By Purok</span>
+        {purokOptions.map((purok) => {
+          const count = purok === "All Puroks"
+            ? households.length
+            : households.filter((household) => householdPurok(household) === purok).length;
+          return (
+            <button
+              key={purok}
+              type="button"
+              aria-pressed={selectedPurok === purok}
+              onClick={() => setSelectedPurok(purok)}
+              className={`text-xs font-semibold px-3 py-1.5 rounded-md border transition ${
+                selectedPurok === purok
+                  ? "bg-[#1e3a5f] text-white border-[#1e3a5f]"
+                  : "bg-white text-slate-600 border-slate-300 hover:bg-slate-50"
+              }`}
+            >
+              {purok} <span className={selectedPurok === purok ? "text-white/75" : "text-slate-400"}>({count})</span>
+            </button>
+          );
+        })}
+      </div>
+          {searchTerm || selectedPurok !== "All Puroks"
+            ? `${filtered.length} of ${households.length} households`
+            : `${households.length} total households`}
 
       {showAddModal && (
         <AddHouseholdModal
@@ -1368,6 +1522,7 @@ export function HouseholdsPage({
                   </div>
                   <div className="text-[13px] text-slate-500 space-y-1">
                     <div>Household ID: <span className="text-slate-700 font-medium">{h.id}</span></div>
+                    <div>Purok: <span className="text-slate-700 font-medium">{householdPurok(h)}</span></div>
                     <div>Standpost #: <span className="text-slate-700 font-medium">{h.standpost}</span></div>
                     <div>Meter #: <span className="text-slate-700 font-medium">{h.meter}</span></div>
                   </div>
@@ -1473,7 +1628,7 @@ export function HouseholdsPage({
         </div>
       ) : (
         <div className="bg-slate-50 border border-slate-200 rounded-lg p-6 text-center text-slate-500">
-          No households found matching "{searchTerm}".
+          No households found for {selectedPurok}{searchTerm ? ` matching "${searchTerm}"` : ""}.
         </div>
       )}
     </>

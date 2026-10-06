@@ -9,6 +9,7 @@ const { getAlertSettings } = require("../utils/settings");
 const { classifyConsumptionRatio } = require("../utils/flowDetection");
 
 const router = express.Router();
+const QR_PAYMENT_REF_PREFIX = "QR:";
 
 // ───────────────────────────────────────────────────────────
 // Residents / households
@@ -331,17 +332,25 @@ router.get("/bills/periods", (req, res) => {
 });
 
 // POST /api/bills/:id/mark-paid  (admin only) — record a payment the admin
-// witnessed directly (cash in hand, or a GCash payment confirmed by other
-// means than the automatic PayMongo flow). Body: { method: "Offline" | "GCash", amount }
+// witnessed directly (cash in hand, or a GCash payment verified against the
+// transaction record). GCash calls must include its numeric reference.
 router.post("/bills/:id/mark-paid", authMiddleware("admin"), (req, res) => {
-  const { method = "Offline" } = req.body || {};
+  const { method = "Offline", reference } = req.body || {};
   const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
   if (!bill) return res.status(404).json({ error: "Bill not found." });
+  if (!['Offline', 'GCash'].includes(method)) {
+    return res.status(400).json({ error: "Choose Cash or GCash as the payment method." });
+  }
+
+  const paymentReference = method === "GCash" && typeof reference === "string" ? reference.trim() : "";
+  if (method === "GCash" && !/^[0-9]{1,80}$/.test(paymentReference)) {
+    return res.status(400).json({ error: "Enter the numeric GCash transaction reference." });
+  }
 
   db.prepare(
-    `UPDATE bills SET payment_status = 'Paid', payment_method = ?, payment_date = datetime('now')
+    `UPDATE bills SET payment_status = 'Paid', payment_method = ?, payment_ref = ?, payment_date = datetime('now')
      WHERE id = ?`
-  ).run(method, req.params.id);
+  ).run(method, method === "GCash" ? `${QR_PAYMENT_REF_PREFIX}${paymentReference}` : null, req.params.id);
 
   recordAudit(req, "bill.mark_paid", bill.household_id, `Marked ${bill.period} bill Paid (${method}) for ${bill.household_id}`);
   res.json({ success: true });
@@ -411,6 +420,32 @@ router.post("/bills/:id/gcash/initiate", authMiddleware("resident"), async (req,
   }
 });
 
+// POST /api/bills/:id/gcash/reference — resident submits the GCash receipt
+// reference after paying through the displayed QR. An admin verifies it.
+router.post("/bills/:id/gcash/reference", authMiddleware("resident"), (req, res) => {
+  const bill = db.prepare("SELECT * FROM bills WHERE id = ?").get(req.params.id);
+  if (!bill) return res.status(404).json({ error: "Bill not found." });
+  if (bill.household_id !== req.user.householdId) {
+    return res.status(403).json({ error: "You can only submit a reference for your own bill." });
+  }
+  if (bill.payment_status === "Paid") {
+    return res.status(400).json({ error: "This bill is already paid." });
+  }
+
+  const reference = typeof req.body?.reference === "string" ? req.body.reference.trim() : "";
+  if (!/^[0-9]{1,80}$/.test(reference)) {
+    return res.status(400).json({ error: "Enter a numeric GCash payment reference (up to 80 digits)." });
+  }
+
+  db.prepare(
+    `UPDATE bills SET payment_status = 'GCash Pending', payment_method = 'GCash', payment_ref = ?
+     WHERE id = ?`
+  ).run(`${QR_PAYMENT_REF_PREFIX}${reference}`, req.params.id);
+
+  recordAudit(req, "bill.gcash_reference_submitted", bill.household_id, `Submitted a GCash QR payment reference for ${bill.household_id} (${bill.period})`);
+  res.json({ success: true, status: "GCash Pending" });
+});
+
 // Shared by both sync routes below: re-checks one bill against PayMongo and
 // marks it Paid if confirmed. `bill` must already be access-checked by the
 // caller. Returns the { success, paid, status } payload to send as JSON.
@@ -420,6 +455,9 @@ async function syncBillWithPaymongo(req, bill) {
   }
   if (bill.payment_status !== "GCash Pending" || !bill.payment_ref) {
     return { success: true, paid: false, status: bill.payment_status };
+  }
+  if (bill.payment_ref.startsWith(QR_PAYMENT_REF_PREFIX)) {
+    return { success: true, paid: false, status: "GCash Pending" };
   }
 
   const session = await paymongo.retrieveCheckoutSession(bill.payment_ref);
@@ -489,6 +527,17 @@ router.post("/bills/:id/gcash/confirm", authMiddleware("admin"), (req, res) => {
   if (!bill) return res.status(404).json({ error: "Bill not found." });
   if (bill.payment_status !== "GCash Pending") {
     return res.status(400).json({ error: "This bill is not pending GCash confirmation." });
+  }
+
+  if (bill.payment_ref?.startsWith(QR_PAYMENT_REF_PREFIX)) {
+    const submittedReference = bill.payment_ref.slice(QR_PAYMENT_REF_PREFIX.length).trim();
+    const verifiedReference = typeof req.body?.reference === "string" ? req.body.reference.trim() : "";
+    if (!/^[0-9]{1,80}$/.test(verifiedReference)) {
+      return res.status(400).json({ error: "Enter the numeric reference shown in the GCash transaction record." });
+    }
+    if (verifiedReference.toUpperCase() !== submittedReference.toUpperCase()) {
+      return res.status(400).json({ error: "The verified reference does not match the resident's submitted reference." });
+    }
   }
 
   db.prepare(

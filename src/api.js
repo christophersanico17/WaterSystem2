@@ -262,10 +262,10 @@ export async function generateBills(period) {
   });
 }
 
-export async function recordCash(billId, amount, method = "Offline") {
+export async function recordCash(billId, amount, method = "Offline", reference) {
   return request(`/bills/${billId}/mark-paid`, {
     method: "POST",
-    body: { method, amount },
+    body: { method, amount, reference },
     auth: "admin",
   });
 }
@@ -284,9 +284,18 @@ export async function initiateGcash(billId) {
   });
 }
 
-export async function confirmGcash(billId) {
+export async function submitGcashReference(billId, reference) {
+  return request(`/bills/${billId}/gcash/reference`, {
+    method: "POST",
+    body: { reference },
+    auth: "resident",
+  });
+}
+
+export async function confirmGcash(billId, reference) {
   return request(`/bills/${billId}/gcash/confirm`, {
     method: "POST",
+    body: reference ? { reference } : undefined,
     auth: "admin",
   });
 }
