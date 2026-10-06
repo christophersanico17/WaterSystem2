@@ -16,6 +16,8 @@ import {
   fetchAdminAccounts,
   createAdminAccount,
   deleteAdminAccount,
+  submitManualReading,
+  fixMeterReadings,
 } from "../api";
 
 const MONTHS = [
@@ -318,7 +320,7 @@ export function ConsumptionPage({ households }) {
   );
 }
 
-export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPayment, receiveCashPayment, showToast, billsGenerated, unpaidCount, onGenerateBills, canGenerateBills = true }) {
+export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPayment, receiveCashPayment, showToast, billsGenerated, unpaidCount, onGenerateBills, canGenerateBills = true, onBillsGenerated }) {
   const paidCount = households.length - unpaidCount;
   const gcashPendingCount = households.filter((h) => h.paymentStatus === "GCash Pending").length;
   const cashPendingCount = households.filter((h) => h.paymentStatus === "Cash Pending").length;
@@ -380,6 +382,8 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
     const match = BILLING_PERIOD.match(/Month of\s+(\w+)\s+(\d{4})/);
     return match ? match[2] : "2026";
   });
+  const [generationMessage, setGenerationMessage] = React.useState(null);
+  const [confirmRegenerate, setConfirmRegenerate] = React.useState(false);
   const selectedPeriodLabel =
     selectedBillingMonth === "All months"
       ? selectedBillingYear === "All years"
@@ -414,6 +418,50 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
   return (
     <>
       <SectionHeader title="Billing Management" />
+      {generationMessage && (
+        <div className="mb-4 bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-emerald-800 text-sm">
+          {generationMessage}
+          <button
+            onClick={() => setGenerationMessage(null)}
+            className="float-right text-emerald-600 hover:text-emerald-700 font-semibold"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+      {confirmRegenerate && (
+        <div className="mb-4 bg-amber-50 border border-amber-300 rounded-lg p-4">
+          <div className="text-amber-900 font-semibold mb-3">
+            Regenerate bills for {selectedPeriodLabel}?
+          </div>
+          <p className="text-amber-800 text-sm mb-4">
+            This will delete and recalculate all amounts with tiered pricing.
+          </p>
+          <div className="flex gap-2">
+            <Btn
+              variant="primary"
+              onClick={() => {
+                setConfirmRegenerate(false);
+                if (typeof onGenerateBills === "function") {
+                  onGenerateBills(selectedPeriodKey, true, (msg) => setGenerationMessage(msg));
+                } else {
+                  setGenerationMessage("Bills regenerated");
+                }
+              }}
+              className="text-sm"
+            >
+              Confirm Regenerate
+            </Btn>
+            <Btn
+              variant="outline"
+              onClick={() => setConfirmRegenerate(false)}
+              className="text-sm"
+            >
+              Cancel
+            </Btn>
+          </div>
+        </div>
+      )}
       <div className="flex flex-wrap items-end gap-3 mb-4">
         <div className="flex flex-wrap items-end gap-2">
           <div>
@@ -442,23 +490,55 @@ export function BillingPage({ households, markPaid, markUnpaid, receiveGcashPaym
           </div>
         </div>
         <div className="ml-auto flex gap-2">
-          {canGenerateBills && (
-            <Btn
-              variant="primary"
-              onClick={() => {
-                if (!selectedPeriodKey) {
-                  showToast("Select a specific billing month and year first.", "warn");
-                  return;
-                }
-                if (typeof onGenerateBills === "function") {
-                  onGenerateBills(selectedPeriodKey);
+          <Btn
+            variant="outline"
+            onClick={async () => {
+              try {
+                const data = await fixMeterReadings();
+                if (data.success) {
+                  setGenerationMessage(`Fixed meter readings in ${data.fixed} bill(s)`);
+                  setTimeout(() => window.location.reload(), 1500);
                 } else {
-                  showToast("Bills generated for all households", "success");
+                  setGenerationMessage(data.message || "Could not fix readings");
                 }
-              }}
-            >
-              Generate Bills
-            </Btn>
+              } catch (err) {
+                setGenerationMessage("Error: " + err.message);
+              }
+            }}
+            className="text-sm"
+          >
+            Fix Meter Readings
+          </Btn>
+          {canGenerateBills && (
+            <div className="flex gap-2">
+              <Btn
+                variant="primary"
+                onClick={() => {
+                  if (!selectedPeriodKey) {
+                    setGenerationMessage("Select a specific billing month and year first.");
+                    return;
+                  }
+                  if (typeof onGenerateBills === "function") {
+                    onGenerateBills(selectedPeriodKey, false, (msg) => setGenerationMessage(msg));
+                  } else {
+                    setGenerationMessage("Bills generated for all households");
+                  }
+                }}
+              >
+                Generate Bills
+              </Btn>
+              <Btn
+                onClick={() => {
+                  if (!selectedPeriodKey) {
+                    setGenerationMessage("Select a billing month and year first.");
+                    return;
+                  }
+                  setConfirmRegenerate(true);
+                }}
+              >
+                Recalculate with New Rates
+              </Btn>
+            </div>
           )}
           <Btn onClick={() => window.print()}>Export PDF</Btn>
           <Btn onClick={() => {
@@ -874,7 +954,6 @@ export function AlertsPage({ alerts, filter, setFilter, selectedAlertId, setSele
   );
 }
 
-<<<<<<< HEAD
 // Freshness-based status for a household's flow-sensor device (thresholds
 // in src/deviceStatus.js, shared with the resident view).
 function DeviceStatusBadge({ household }) {
@@ -1291,6 +1370,7 @@ export function HouseholdsPage({
   const [searchTerm, setSearchTerm] = React.useState("");
   const [expandedId, setExpandedId] = React.useState(null);
   const [showAddModal, setShowAddModal] = React.useState(false);
+  const [manualReadingHouseholdId, setManualReadingHouseholdId] = React.useState(null);
 
   // DeviceStatusBadge reads Date.now() at render time, so without new data
   // arriving (a fresh reading, a page action) it would never notice a device
@@ -1339,15 +1419,27 @@ export function HouseholdsPage({
         />
       )}
 
+      {manualReadingHouseholdId && (
+        <ManualReadingModal
+          household={households.find((h) => h.id === manualReadingHouseholdId)}
+          showToast={showToast}
+          onClose={() => setManualReadingHouseholdId(null)}
+          onSuccess={() => {
+            setManualReadingHouseholdId(null);
+            // Note: in a real app, would trigger a refresh of household data
+          }}
+        />
+      )}
+
       {filtered.length > 0 ? (
-        <div className="columns-1 sm:columns-2 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {filtered.map((h) => {
             const isExpanded = expandedId === h.id;
             const isDimmed = expandedId !== null && !isExpanded;
             return (
               <div
                 key={h.id}
-                className={`card-hover bg-white rounded-lg border p-3.5 mb-3 break-inside-avoid-column cursor-pointer motion-safe:hover:-translate-y-0.5 transition-all duration-200 ${
+                className={`card-hover bg-white rounded-lg border p-3.5 cursor-pointer motion-safe:hover:-translate-y-0.5 transition-all duration-200 ${
                   isExpanded
                     ? "border-slate-800 ring-2 ring-slate-300 shadow-[0_0_16px_rgba(0,0,0,0.35)]"
                     : isDimmed
@@ -1375,7 +1467,7 @@ export function HouseholdsPage({
                 </button>
 
                 {isExpanded && (
-                  <div className="mt-3 pt-3 border-t border-slate-100 text-[13px] text-slate-600 space-y-2.5">
+                  <div className="mt-3 pt-3 border-t border-slate-200 text-[13px] space-y-3">
                     {h.passwordResetRequested && (
                       <PasswordResetRequestBanner
                         household={h}
@@ -1383,82 +1475,89 @@ export function HouseholdsPage({
                         showToast={showToast}
                       />
                     )}
+
+                    {/* Live Flow */}
                     {(() => {
-                      // An offline sensor's last flow value is stale, not
-                      // "live" — show it only while the device is reporting.
                       const online = isDeviceOnline(h);
                       const flowing = online && (h.lastFlow || 0) > 0;
                       const isHighFlow = online && h.flowType === "High flow";
                       return (
-                        <div
-                          className={`flex items-center justify-between rounded-lg px-3 py-2 ${
-                            isHighFlow ? "bg-amber-50" : flowing ? "bg-sky-50" : "bg-slate-50"
-                          }`}
-                        >
-                          <span className="text-slate-500 font-medium">Live flow</span>
-                          {online ? (
-                            <span className={`text-xl font-bold ${isHighFlow ? "text-amber-700" : flowing ? "text-sky-700" : "text-slate-600"}`}>
-                              {(h.lastFlow || 0).toFixed(1)} <span className="text-xs font-medium">L/min</span>
-                              {isHighFlow && <span className="ml-1.5 text-xs font-semibold text-amber-600">High flow</span>}
-                            </span>
-                          ) : (
-                            <span className="text-[13px] font-medium text-slate-400">
-                              {!h.deviceProvisioned
-                                ? "No sensor connected"
-                                : h.deviceLastSeen
-                                ? "— Sensor offline"
-                                : "Awaiting first reading"}
-                            </span>
-                          )}
+                        <div className={`rounded-lg px-3 py-2 ${isHighFlow ? "bg-amber-50" : flowing ? "bg-sky-50" : "bg-slate-50"}`}>
+                          <div className="flex justify-between items-center">
+                            <span className="text-slate-500 font-medium">Flow Rate</span>
+                            {online ? (
+                              <span className={`font-bold ${isHighFlow ? "text-amber-700" : flowing ? "text-sky-700" : "text-slate-600"}`}>
+                                {(h.lastFlow || 0).toFixed(1)} L/min {isHighFlow && <span className="text-xs text-amber-600">High flow</span>}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-slate-400">
+                                {!h.deviceProvisioned ? "Not connected" : h.deviceLastSeen ? "Offline" : "Awaiting"}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       );
                     })()}
-                    {isDeviceOnline(h) && <PerSecondUsageChart liters={h.perSecondLiters || []} />}
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>Current reading: <span className="font-semibold text-slate-800">{h.currCm3} CM³</span></div>
-                      <div>Previous reading: <span className="font-semibold text-slate-800">{h.prevCm3} CM³</span></div>
-                      <div>This cycle: <span className="font-semibold text-slate-800">{h.consumption} CM³</span></div>
-                      <div>Amount due: <span className="font-semibold text-slate-800">{peso(h.amount)}</span></div>
-                      <div>Total due: <span className="font-semibold text-slate-800">{peso(h.totalDue)}</span></div>
-                    </div>
-                    <div className="flex items-center justify-between pt-1">
-                      <span>
-                        Payment status:{" "}
-                        {h.paymentStatus === "Paid" ? (
-                          <Badge tone="good">Paid</Badge>
-                        ) : h.paymentStatus === "GCash Pending" ? (
-                          <Badge tone="info">GCash Pending</Badge>
-                        ) : h.paymentStatus === "Cash Pending" ? (
-                          <Badge tone="warn">Cash Pending</Badge>
-                        ) : (
-                          <Badge tone="bad">Unpaid</Badge>
-                        )}
-                      </span>
-                      <span>
-                        Account: {h.password ? (
-                          <span className="text-emerald-600 font-medium">Password set</span>
-                        ) : (
-                          <span className="text-amber-600 font-medium">Not yet activated</span>
-                        )}
-                      </span>
-                    </div>
-                    {h.password && (
-                      <div className="pt-1">
-                        <Btn
-                          variant="outline"
-                          onClick={() => {
-                            if (typeof onResetPassword === "function") {
-                              onResetPassword(h.id);
-                            } else if (typeof showToast === "function") {
-                              showToast(`${h.id} password reset — resident must set a new one on next login.`, "info");
-                            }
-                          }}
-                        >
-                          Reset password
-                        </Btn>
-                      </div>
-                    )}
 
+                    {/* Readings & Billing - Compact Grid */}
+                    <div className="grid grid-cols-4 gap-2 bg-slate-50 rounded-lg p-2">
+                      <div className="text-center">
+                        <div className="text-slate-500 text-xs">Current</div>
+                        <div className="font-semibold text-slate-800 text-sm">{h.currCm3} CM³</div>
+                      </div>
+                      <div className="text-center">
+                        <div className="text-slate-500 text-xs">Previous</div>
+                        <div className="font-semibold text-slate-800 text-sm">{h.prevCm3} CM³</div>
+                      </div>
+                      <div className="text-center">
+                        <div className="text-slate-500 text-xs">Usage</div>
+                        <div className="font-semibold text-slate-800 text-sm">{h.consumption} CM³</div>
+                      </div>
+                      <div className="text-center border-l border-slate-200 pl-2">
+                        <div className="text-slate-500 text-xs">Due</div>
+                        <div className="font-semibold text-slate-800 text-sm">{peso(h.totalDue)}</div>
+                      </div>
+                    </div>
+
+                    {/* Manual Entry */}
+                    <Btn variant="outline" onClick={() => setManualReadingHouseholdId(h.id)} className="w-full text-sm">
+                      Manual meter entry
+                    </Btn>
+
+                    {/* Status Grid */}
+                    <div className="grid grid-cols-3 gap-2">
+                      <div className="bg-slate-50 rounded p-2">
+                        <div className="text-slate-500 text-xs mb-0.5">Payment</div>
+                        <Badge tone={h.paymentStatus === "Paid" ? "good" : h.paymentStatus?.includes("Pending") ? "warn" : "bad"}>
+                          {h.paymentStatus === "Paid" ? "Paid" : h.paymentStatus?.replace(" ", "\n") || "Unpaid"}
+                        </Badge>
+                      </div>
+                      <div className="bg-slate-50 rounded p-2">
+                        <div className="text-slate-500 text-xs mb-0.5">Account</div>
+                        <span className={`text-xs font-semibold ${h.password ? "text-emerald-600" : "text-amber-600"}`}>
+                          {h.password ? "Active" : "Setup"}
+                        </span>
+                      </div>
+                      <div className="bg-slate-50 rounded p-2 flex flex-col justify-center">
+                        {h.password ? (
+                          <Btn variant="outline" size="sm" onClick={() => {
+                            if (typeof onResetPassword === "function") onResetPassword(h.id);
+                            else if (typeof showToast === "function") showToast(`${h.id} password reset`, "info");
+                          }} className="text-xs">
+                            Reset
+                          </Btn>
+                        ) : (
+                          <Btn variant="primary" size="sm" onClick={() => {
+                            if (typeof onResetPassword === "function") onResetPassword(h.id);
+                            else if (typeof showToast === "function") showToast(`${h.id} account activated`, "info");
+                          }} className="text-xs">
+                            Activate
+                          </Btn>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Device Section */}
                     <DeviceManager
                       household={h}
                       onProvisionDevice={onProvisionDevice}
@@ -1636,6 +1735,97 @@ function AddHouseholdModal({ onAdd, showToast, onClose }) {
               disabled={submitting}
             >
               {submitting ? "Adding…" : "Add Household"}
+            </Btn>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function ManualReadingModal({ household, showToast, onClose, onSuccess }) {
+  const [cm3, setCm3] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  if (!household) return null;
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError("");
+    const reading = Number(cm3);
+
+    if (!Number.isFinite(reading) || reading < 0) {
+      setError("Please enter a valid meter reading (CM³).");
+      return;
+    }
+
+    if (reading < household.prevCm3) {
+      setError("Meter reading cannot be lower than the previous reading.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await submitManualReading(household.id, reading);
+      showToast?.(`Manual reading recorded for ${household.id} — ${reading} CM³`, "success");
+      onSuccess?.();
+    } catch (err) {
+      setError(err.message || "Could not record reading.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
+        <div className="bg-[#1e3a5f] text-white px-5 py-4 flex items-center justify-between">
+          <div className="font-bold">Manual Meter Reading</div>
+          <button onClick={onClose} className="text-white/80 hover:text-white text-lg leading-none">×</button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-5 space-y-3">
+          <div className="bg-slate-50 rounded-lg px-3 py-2 text-[12px]">
+            <div className="text-slate-500 mb-0.5">Household</div>
+            <div className="font-semibold text-slate-800">{household.id} — {household.name}</div>
+            <div className="text-slate-600 text-[11px]">Meter: {household.meter}</div>
+          </div>
+
+          <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-[11px] text-blue-700">
+            Previous reading: <span className="font-semibold">{household.prevCm3} CM³</span>
+          </div>
+
+          {error && (
+            <div className="bg-rose-50 border border-rose-200 rounded-md px-3 py-2 text-[11px] text-rose-700">
+              {error}
+            </div>
+          )}
+
+          <div>
+            <label className="text-[11px] font-medium text-slate-600 block mb-1">
+              Current meter reading (CM³) <span className="text-rose-500">*</span>
+            </label>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={cm3}
+              onChange={(e) => setCm3(e.target.value)}
+              className="w-full border border-slate-300 rounded-md px-2.5 py-1.5 text-[12px] focus:outline-none focus:border-sky-400"
+              placeholder={`e.g., ${household.prevCm3 + 100}`}
+              autoFocus
+            />
+          </div>
+
+          <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[10px] text-amber-700">
+            ⚠️ This reading will be recorded as "manual" and logged in the audit trail.
+          </div>
+
+          <div className="flex gap-2 pt-2">
+            <Btn type="button" className="flex-1" onClick={onClose}>Cancel</Btn>
+            <Btn type="submit" variant="primary" className="flex-1" disabled={submitting}>
+              {submitting ? "Recording…" : "Record reading"}
             </Btn>
           </div>
         </form>

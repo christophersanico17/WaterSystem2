@@ -330,6 +330,7 @@ export function AdminView(props) {
               unpaidCount={unpaidCount}
               onGenerateBills={onGenerateBills}
               canGenerateBills={isOfficer}
+              setPage={setPage}
             />
           )}
           {activePage === "alerts" && (

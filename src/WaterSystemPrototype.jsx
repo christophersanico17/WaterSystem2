@@ -67,8 +67,24 @@ export default function WaterSystemPrototype() {
   const [activeResidentId, setActiveResidentId] = useState(residentSession?.householdId || null);
 
   const [toast, setToast] = useState(null);
-  const [adminPage, setAdminPage] = useState(adminSession ? "dashboard" : "login");
-  const [residentPage, setResidentPage] = useState(residentSession ? "dashboard" : "login");
+  const [adminPage, setAdminPageState] = useState(() => {
+    if (!adminSession) return "login";
+    return localStorage.getItem("adminPage") || "dashboard";
+  });
+  const [residentPage, setResidentPageState] = useState(() => {
+    if (!residentSession) return "login";
+    return localStorage.getItem("residentPage") || "dashboard";
+  });
+
+  const setAdminPage = (page) => {
+    setAdminPageState(page);
+    localStorage.setItem("adminPage", page);
+  };
+
+  const setResidentPage = (page) => {
+    setResidentPageState(page);
+    localStorage.setItem("residentPage", page);
+  };
   const [alertFilter, setAlertFilter] = useState("All");
   const [selectedAlertId, setSelectedAlertId] = useState(null);
   const [paymentModal, setPaymentModal] = useState(null);
@@ -635,21 +651,30 @@ export default function WaterSystemPrototype() {
     };
   }, [residentAuthenticated]); // eslint-disable-line
 
-  async function handleGenerateBills(period) {
+  async function handleGenerateBills(period, force, onMessage) {
     if (!USE_API) {
-      showToast("Bill generation requires the backend to be running.", "warn");
+      if (onMessage) onMessage("Bill generation requires the backend to be running.");
+      else showToast("Bill generation requires the backend to be running.", "warn");
       return;
     }
     try {
-      const result = await generateBills(period);
+      const result = await generateBills(period, force);
       await loadFromAPI(true);
-      showToast(
-        `Generated ${result.created} bill(s) for ${period}` +
-          (result.skipped ? ` — ${result.skipped} household(s) already billed for this period.` : "."),
-        "success"
-      );
+      const msg = force
+        ? `Recalculated ${result.created} new and updated ${result.updated} existing bills for ${period} with tiered pricing.`
+        : `Generated ${result.created} bill(s) for ${period}${result.skipped ? ` — ${result.skipped} already billed` : "."}`;
+      if (onMessage) {
+        onMessage(msg);
+      } else {
+        showToast(msg, "success");
+      }
     } catch (err) {
-      showToast("Could not generate bills: " + err.message, "warn");
+      const errMsg = "Could not generate bills: " + err.message;
+      if (onMessage) {
+        onMessage(errMsg);
+      } else {
+        showToast(errMsg, "warn");
+      }
     }
   }
 
