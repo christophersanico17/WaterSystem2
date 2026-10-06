@@ -95,6 +95,8 @@ function initSchema() {
       payment_ref TEXT,
       payment_date TEXT,
       due_date TEXT,
+      receipt_image TEXT,               -- base64 encoded receipt image for GCash payments
+      payment_rejection_reason TEXT,    -- reason why admin rejected the payment
       created_at TEXT DEFAULT (datetime('now')),
       UNIQUE(household_id, period)
     );

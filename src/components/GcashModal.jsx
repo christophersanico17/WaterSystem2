@@ -4,11 +4,23 @@ import gcashQrImage from "../assets/gcash-qr.jpg";
 
 export function GcashModal({ household, step, onConfirm, onClose }) {
   const [paymentReference, setPaymentReference] = React.useState("");
+  const [receiptFile, setReceiptFile] = React.useState(null);
+  const [receiptPreview, setReceiptPreview] = React.useState(null);
   if (!household) return null;
+
+  function handleReceiptChange(e) {
+    const file = e.target.files?.[0];
+    if (file) {
+      setReceiptFile(file);
+      const reader = new FileReader();
+      reader.onload = (ev) => setReceiptPreview(ev.target?.result);
+      reader.readAsDataURL(file);
+    }
+  }
 
   function submitReference(event) {
     event.preventDefault();
-    onConfirm(paymentReference.trim());
+    onConfirm({ reference: paymentReference.trim(), receipt: receiptFile });
   }
 
   return (
@@ -48,6 +60,31 @@ export function GcashModal({ household, step, onConfirm, onClose }) {
                 autoComplete="off"
                 className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
                 placeholder="Enter receipt reference"
+              />
+              <label htmlFor="receipt-upload" className="w-full text-xs font-semibold text-slate-600 mb-1 mt-3">
+                Receipt photo (optional)
+              </label>
+              {receiptPreview && (
+                <div className="mb-3 relative">
+                  <img src={receiptPreview} alt="Receipt preview" className="w-full max-h-40 object-contain rounded-md border border-slate-200" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReceiptFile(null);
+                      setReceiptPreview(null);
+                    }}
+                    className="absolute top-2 right-2 bg-red-500 hover:bg-red-600 text-white rounded-full w-6 h-6 flex items-center justify-center text-sm"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
+              <input
+                id="receipt-upload"
+                type="file"
+                accept="image/*"
+                onChange={handleReceiptChange}
+                className="w-full text-xs"
               />
               <button
                 type="submit"
