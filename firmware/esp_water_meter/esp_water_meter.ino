@@ -38,6 +38,21 @@
 #endif
 
 #include <WiFiUdp.h>
+#include <FS.h>
+
+#if defined(ESP32)
+  #include <SPIFFS.h>
+#endif
+
+// ── Local reading buffer (SPIFFS) ───────────────────────────
+// Stores readings with timestamps during WiFi outages (max 24 hours / 500 readings)
+// Format: one JSON reading per line in /readings.jsonl
+// Structure: {"ts":1234567890,"pulses":1234,"intervalMs":60000}
+
+const int MAX_BUFFERED_READINGS = 500;
+const unsigned long MAX_BUFFER_AGE_MS = 24UL * 60UL * 60UL * 1000UL; // 24 hours
+unsigned long lastTimeSync = 0;
+bool timeIsSynced = false;
 
 // ── Server discovery ────────────────────────────────────────
 // Filled in at runtime by discoverServer() (e.g. "http://192.168.254.144:4000")
@@ -119,6 +134,29 @@ unsigned long pendingPulses = 0;
 unsigned long pendingIntervalMs = 0;
 const unsigned long MAX_PENDING_INTERVAL_MS = 9UL * 60UL * 1000UL;
 
+void initStorage() {
+  #if defined(ESP32)
+    if (!SPIFFS.begin(true)) {
+      Serial.println(F("Failed to mount SPIFFS"));
+      return;
+    }
+  #elif defined(ESP8266)
+    if (!SPIFFS.begin()) {
+      Serial.println(F("Failed to mount SPIFFS"));
+      return;
+    }
+  #endif
+
+  Serial.println(F("SPIFFS mounted, local reading buffer ready"));
+
+  // Clean up readings older than 24 hours
+  cleanupOldReadings();
+
+  // Show buffer status
+  int count = countBufferedReadings();
+  Serial.printf("Buffered readings: %d / %d\n", count, MAX_BUFFERED_READINGS);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -135,6 +173,7 @@ void setup() {
   pinMode(FLOW_SENSOR_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(FLOW_SENSOR_PIN), onPulse, FALLING);
 
+  initStorage();
   connectWiFi();
   discoverServer();
   lastReportMs = millis();
@@ -146,6 +185,16 @@ void loop() {
 
   if (WiFi.status() == WL_CONNECTED && serverUrl.length() == 0 && millis() - lastDiscoveryMs >= DISCOVERY_RETRY_MS) {
     discoverServer();
+  }
+
+  // On WiFi reconnect with server found: sync time and resend buffered readings
+  static bool hasResynced = false;
+  if (WiFi.status() == WL_CONNECTED && serverUrl.length() > 0 && !hasResynced) {
+    syncTimeWithServer();
+    resendBufferedReadings();
+    hasResynced = true;
+  } else if (WiFi.status() != WL_CONNECTED) {
+    hasResynced = false; // Reset flag when WiFi drops
   }
 
   unsigned long now = millis();
@@ -229,14 +278,14 @@ void connectWiFi() {
 void ensureWiFiConnected() {
   if (WiFi.status() == WL_CONNECTED) {
     if (!wasWiFiConnected) {
-      // Back online after a drop — the server's address may have changed
-      // meanwhile, so the old one can't be trusted. Rediscover right away.
+      // Back online after a drop — sync time and resend buffered readings
       Serial.print(F("WiFi reconnected, IP: "));
       Serial.println(WiFi.localIP());
       digitalWrite(LED_BUILTIN, LOW);
       wasWiFiConnected = true;
       serverUrl = "";
       discoverServer();
+      // Sync time and resend buffered readings once server is discovered
     }
     return;
   }
@@ -316,11 +365,13 @@ bool discoverServer() {
 // pending totals itself.
 bool sendReading(unsigned long pulses, unsigned long intervalMs) {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println(F("Skipping report — no WiFi. Pulses will be included in the next successful report."));
+    Serial.println(F("Skipping report — no WiFi. Buffering for later resend."));
+    bufferReading(pulses, intervalMs);
     return false;
   }
   if (serverUrl.length() == 0) {
-    Serial.println(F("Skipping report — server not found yet. Pulses will be included in the next successful report."));
+    Serial.println(F("Skipping report — server not found yet. Buffering for later resend."));
+    bufferReading(pulses, intervalMs);
     return false;
   }
 
@@ -393,4 +444,170 @@ bool sendReading(unsigned long pulses, unsigned long intervalMs) {
   digitalWrite(LED_BUILTIN, LOW);
 
   return ok;
+}
+
+// ── Local reading buffer (SPIFFS) ───────────────────────────
+
+// Sync time with the server on WiFi reconnect (first successful API request)
+// Server responds with {"timestamp":1234567890}
+void syncTimeWithServer() {
+  if (!timeIsSynced || millis() - lastTimeSync > 3600000) { // re-sync every hour
+    if (WiFi.status() != WL_CONNECTED || serverUrl.length() == 0) return;
+
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
+    bool https = serverUrl.startsWith("https://");
+    if (https) secureClient.setInsecure();
+
+    HTTPClient http;
+    String url = serverUrl + "/api/time";
+
+    if (!(https ? http.begin(secureClient, url) : http.begin(plainClient, url))) {
+      return;
+    }
+    http.setTimeout(5000);
+
+    int status = http.GET();
+    if (status == 200) {
+      String response = http.getString();
+      // Parse {"timestamp":1234567890}
+      int tsPos = response.indexOf("\"timestamp\":");
+      if (tsPos >= 0) {
+        unsigned long ts = strtoul(response.c_str() + tsPos + 12, NULL, 10);
+        if (ts > 1000000000) { // sanity check
+          configTime(0, 0, "pool.ntp.org"); // UTC
+          time_t now = ts;
+          struct tm timeinfo = *gmtime(&now);
+          mktime(&timeinfo);
+          timeIsSynced = true;
+          lastTimeSync = millis();
+          Serial.printf("Time synced: %lu\n", ts);
+        }
+      }
+    }
+    http.end();
+  }
+}
+
+// Buffer a reading to SPIFFS for later resend (when WiFi is down)
+void bufferReading(unsigned long pulses, unsigned long intervalMs) {
+  if (countBufferedReadings() >= MAX_BUFFERED_READINGS) {
+    Serial.println(F("Buffer full — oldest reading dropped"));
+    // Remove oldest reading (first line)
+    File oldFile = SPIFFS.open("/readings.jsonl", "r");
+    File newFile = SPIFFS.open("/readings.tmp", "w");
+    bool skipFirst = true;
+    String line = "";
+    while (oldFile.available()) {
+      char c = oldFile.read();
+      if (c == '\n') {
+        if (!skipFirst) newFile.println(line);
+        skipFirst = false;
+        line = "";
+      } else {
+        line += c;
+      }
+    }
+    oldFile.close();
+    newFile.close();
+    SPIFFS.remove("/readings.jsonl");
+    SPIFFS.rename("/readings.tmp", "/readings.jsonl");
+  }
+
+  File f = SPIFFS.open("/readings.jsonl", "a");
+  time_t now = time(nullptr);
+  String json = String("{\"ts\":") + now + ",\"pulses\":" + pulses + ",\"intervalMs\":" + intervalMs + "}";
+  f.println(json);
+  f.close();
+
+  Serial.printf("Buffered: %s\n", json.c_str());
+}
+
+// Count readings in buffer
+int countBufferedReadings() {
+  if (!SPIFFS.exists("/readings.jsonl")) return 0;
+  File f = SPIFFS.open("/readings.jsonl", "r");
+  int count = 0;
+  while (f.available()) {
+    if (f.read() == '\n') count++;
+  }
+  f.close();
+  return count;
+}
+
+// Remove readings older than 24 hours
+void cleanupOldReadings() {
+  if (!SPIFFS.exists("/readings.jsonl")) return;
+
+  time_t now = time(nullptr);
+  unsigned long now_ms = millis();
+  if (!timeIsSynced) now = now_ms / 1000; // Use millis as approximation
+
+  File oldFile = SPIFFS.open("/readings.jsonl", "r");
+  File newFile = SPIFFS.open("/readings.tmp", "w");
+  String line = "";
+
+  while (oldFile.available()) {
+    char c = oldFile.read();
+    if (c == '\n') {
+      // Parse {"ts":1234567890,...}
+      int tsPos = line.indexOf("\"ts\":");
+      if (tsPos >= 0) {
+        unsigned long ts = strtoul(line.c_str() + tsPos + 5, NULL, 10);
+        unsigned long age = now > ts ? now - ts : 0;
+        if (age < MAX_BUFFER_AGE_MS / 1000) {
+          newFile.println(line);
+        } else {
+          Serial.printf("Discarding buffered reading (age: %lus)\n", age);
+        }
+      }
+      line = "";
+    } else {
+      line += c;
+    }
+  }
+  oldFile.close();
+  newFile.close();
+  SPIFFS.remove("/readings.jsonl");
+  SPIFFS.rename("/readings.tmp", "/readings.jsonl");
+}
+
+// Batch resend all buffered readings when WiFi comes back
+void resendBufferedReadings() {
+  if (!SPIFFS.exists("/readings.jsonl")) return;
+
+  Serial.println(F("Resending buffered readings…"));
+  File f = SPIFFS.open("/readings.jsonl", "r");
+  int sent = 0;
+  String line = "";
+
+  while (f.available()) {
+    char c = f.read();
+    if (c == '\n') {
+      // Parse and send each line
+      int pulPos = line.indexOf("\"pulses\":");
+      int intPos = line.indexOf("\"intervalMs\":");
+      if (pulPos >= 0 && intPos >= 0) {
+        unsigned long pulses = strtoul(line.c_str() + pulPos + 9, NULL, 10);
+        unsigned long intervalMs = strtoul(line.c_str() + intPos + 13, NULL, 10);
+
+        if (sendReading(pulses, intervalMs)) {
+          sent++;
+          delay(100); // stagger requests
+        } else {
+          f.close();
+          Serial.printf("Buffered resend stopped after %d successful sends\n", sent);
+          return; // Stop if one fails — will retry next time
+        }
+      }
+      line = "";
+    } else {
+      line += c;
+    }
+  }
+  f.close();
+
+  // Clear buffer on success
+  SPIFFS.remove("/readings.jsonl");
+  Serial.printf("Resent %d buffered readings\n", sent);
 }

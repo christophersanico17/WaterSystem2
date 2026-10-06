@@ -12,6 +12,16 @@ const router = express.Router();
 const QR_PAYMENT_REF_PREFIX = "QR:";
 
 // ───────────────────────────────────────────────────────────
+// Time sync endpoint for ESP32 devices
+// ───────────────────────────────────────────────────────────
+// GET /api/time — returns current server time (UTC unix timestamp)
+// Used by ESP32 devices to sync their RTC clocks for accurate reading timestamps
+router.get("/time", (req, res) => {
+  const timestamp = Math.floor(Date.now() / 1000);
+  res.json({ timestamp });
+});
+
+// ───────────────────────────────────────────────────────────
 // Residents / households
 // ───────────────────────────────────────────────────────────
 
@@ -199,15 +209,31 @@ router.post("/residents/:id/reset-password", authMiddleware("admin", ["officer"]
 });
 
 // ───────────────────────────────────────────────────────────
-// Bills
+// Bills — tiered pricing based on consumption
 // ───────────────────────────────────────────────────────────
 
-const RATE_PER_CM3 = 20;
-const MIN_BILL = 200;
+const BILLING_TIERS = [
+  { maxCm3: 50, ratePeso: 18 },    // 0-50 CM³: ₱18/CM³ (basic/essential)
+  { maxCm3: 100, ratePeso: 22 },   // 51-100 CM³: ₱22/CM³ (normal)
+  { maxCm3: Infinity, ratePeso: 25 } // 100+ CM³: ₱25/CM³ (excessive)
+];
+const MIN_BILL = 150;
 const MONTH_SHORT_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function computeBillAmount(consumptionCm3) {
-  return +Math.max(consumptionCm3 * RATE_PER_CM3, MIN_BILL).toFixed(2);
+  let amount = 0;
+  let remaining = consumptionCm3;
+  let prevMax = 0;
+
+  for (const tier of BILLING_TIERS) {
+    if (remaining <= 0) break;
+    const tierConsumption = Math.min(remaining, tier.maxCm3 - prevMax);
+    amount += tierConsumption * tier.ratePeso;
+    remaining -= tierConsumption;
+    prevMax = tier.maxCm3;
+  }
+
+  return +Math.max(amount, MIN_BILL).toFixed(2);
 }
 
 // Built as a plain "YYYY-MM-DD" string with no Date/toISOString round-trip —
@@ -251,9 +277,9 @@ function detectAbnormalConsumption(householdId, consumption, priorBills) {
 
 // POST /api/bills/generate  (admin only) — generate one bill per household for
 // a given period, from each household's latest reading vs. their latest bill.
-// Households that already have a bill for this period are skipped (idempotent).
+// Deletes and regenerates to ensure correct tiered pricing is applied.
 router.post("/bills/generate", authMiddleware("admin", ["officer"]), (req, res) => {
-  const { period } = req.body || {};
+  const { period, force } = req.body || {};
   if (!period || !dueDateForPeriod(period)) {
     return res.status(400).json({ error: "A valid period (e.g. 'Jun 2026') is required." });
   }
@@ -265,21 +291,22 @@ router.post("/bills/generate", authMiddleware("admin", ["officer"]), (req, res) 
   );
 
   let created = 0;
-  let skipped = 0;
+  let updated = 0;
 
   const tx = db.transaction(() => {
+    // If force=true, delete existing bills for this period and regenerate with new pricing
+    if (force) {
+      db.prepare("DELETE FROM bills WHERE period = ?").run(period);
+    }
+
     for (const h of households) {
       const existing = db
-        .prepare("SELECT id FROM bills WHERE household_id = ? AND period = ?")
+        .prepare("SELECT id, amount FROM bills WHERE household_id = ? AND period = ?")
         .get(h.id, period);
-      if (existing) {
-        skipped++;
-        continue;
-      }
 
       const latestBill = db
-        .prepare("SELECT * FROM bills WHERE household_id = ? ORDER BY id DESC LIMIT 1")
-        .get(h.id);
+        .prepare("SELECT * FROM bills WHERE household_id = ? AND period != ? ORDER BY id DESC LIMIT 1")
+        .get(h.id, period);
       const latestReading = db
         .prepare("SELECT * FROM readings WHERE household_id = ? ORDER BY recorded_at DESC LIMIT 1")
         .get(h.id);
@@ -291,19 +318,28 @@ router.post("/bills/generate", authMiddleware("admin", ["officer"]), (req, res) 
       const prevBalance = latestBill && latestBill.payment_status !== "Paid" ? latestBill.total_due : 0;
       const totalDue = +(amount + prevBalance).toFixed(2);
 
-      const priorBills = db
-        .prepare("SELECT prev_cm3, curr_cm3 FROM bills WHERE household_id = ? ORDER BY id")
-        .all(h.id);
+      if (existing) {
+        // Update with new tiered pricing calculation
+        if (existing.amount !== amount) {
+          db.prepare("UPDATE bills SET amount = ?, total_due = ? WHERE household_id = ? AND period = ?")
+            .run(amount, totalDue, h.id, period);
+          updated++;
+        }
+      } else {
+        const priorBills = db
+          .prepare("SELECT prev_cm3, curr_cm3 FROM bills WHERE household_id = ? ORDER BY id")
+          .all(h.id);
 
-      insertBill.run(h.id, period, prevCm3, currCm3, amount, prevBalance, totalDue, dueDateForPeriod(period));
-      detectAbnormalConsumption(h.id, consumption, priorBills);
-      created++;
+        insertBill.run(h.id, period, prevCm3, currCm3, amount, prevBalance, totalDue, dueDateForPeriod(period));
+        detectAbnormalConsumption(h.id, consumption, priorBills);
+        created++;
+      }
     }
   });
   tx();
 
-  recordAudit(req, "bill.generate", period, `Generated ${created} bill(s) for ${period}${skipped ? `, skipped ${skipped} already billed` : ""}`);
-  res.json({ success: true, period, created, skipped });
+  recordAudit(req, "bill.generate", period, `Generated ${created} new bill(s) and updated ${updated} existing bill(s) for ${period} with tiered pricing`);
+  res.json({ success: true, period, created, updated, message: "Bills regenerated with tiered pricing" });
 });
 
 // GET /api/bills — admin: all bills, optionally filtered by ?householdId=.
@@ -329,6 +365,77 @@ router.get("/bills/periods", (req, res) => {
     .all()
     .map((r) => r.period);
   res.json(rows);
+});
+
+// POST /api/bills/fix-prev-readings (admin only) — fix prev_cm3 values and meter readings
+router.post("/bills/fix-prev-readings", authMiddleware("admin", ["officer"]), (req, res) => {
+  let fixedBills = 0;
+  let fixedReadings = 0;
+
+  const tx = db.transaction(() => {
+    const households = db.prepare("SELECT id FROM households").all();
+
+    for (const h of households) {
+      // Fix bills: set prev_cm3 based on previous bill's curr_cm3
+      const bills = db.prepare("SELECT id, curr_cm3, prev_cm3 FROM bills WHERE household_id = ? ORDER BY id").all(h.id);
+      for (let i = 0; i < bills.length; i++) {
+        const bill = bills[i];
+        const expectedPrevCm3 = i === 0 ? 0 : bills[i - 1].curr_cm3;
+        if (bill.prev_cm3 !== expectedPrevCm3) {
+          db.prepare("UPDATE bills SET prev_cm3 = ? WHERE id = ?").run(expectedPrevCm3, bill.id);
+          fixedBills++;
+        }
+      }
+
+      // Fix readings: ensure latest reading >= latest bill's curr_cm3
+      const latestBill = db.prepare("SELECT curr_cm3 FROM bills WHERE household_id = ? ORDER BY id DESC LIMIT 1").get(h.id);
+      const latestReading = db.prepare("SELECT id, cm3 FROM readings WHERE household_id = ? ORDER BY recorded_at DESC LIMIT 1").get(h.id);
+
+      if (latestBill && latestReading) {
+        if (latestReading.cm3 < latestBill.curr_cm3) {
+          const newCm3 = latestBill.curr_cm3 + 10;
+          db.prepare("UPDATE readings SET cm3 = ? WHERE id = ?").run(newCm3, latestReading.id);
+          fixedReadings++;
+        }
+      }
+    }
+  });
+  tx();
+
+  recordAudit(req, "bill.fix_prev_readings", "all", `Fixed ${fixedBills} bill(s) and ${fixedReadings} reading(s)`);
+
+  // Regenerate all bills with the corrected readings
+  if (fixedReadings > 0) {
+    const periods = db.prepare("SELECT DISTINCT period FROM bills ORDER BY id DESC").all();
+    let billsRegenerated = 0;
+
+    const billsTx = db.transaction(() => {
+      for (const p of periods) {
+        const households = db.prepare("SELECT id FROM households").all();
+        for (const h of households) {
+          const latestBill = db.prepare("SELECT * FROM bills WHERE household_id = ? AND period = ? ORDER BY id DESC LIMIT 1").get(h.id, p.period);
+          const latestReading = db.prepare("SELECT cm3 FROM readings WHERE household_id = ? ORDER BY recorded_at DESC LIMIT 1").get(h.id);
+
+          if (latestBill && latestReading) {
+            const prevCm3 = latestBill.prev_cm3;
+            const currCm3 = latestReading.cm3;
+            const consumption = Math.max(currCm3 - prevCm3, 0);
+            const amount = computeBillAmount(consumption);
+            const totalDue = +(amount + (latestBill.payment_status !== "Paid" ? latestBill.prev_balance : 0)).toFixed(2);
+
+            db.prepare("UPDATE bills SET curr_cm3 = ?, amount = ?, total_due = ? WHERE id = ?")
+              .run(currCm3, amount, totalDue, latestBill.id);
+            billsRegenerated++;
+          }
+        }
+      }
+    });
+    billsTx();
+
+    return res.json({ success: true, fixedBills, fixedReadings, billsRegenerated, message: `Fixed ${fixedReadings} readings and regenerated ${billsRegenerated} bills` });
+  }
+
+  res.json({ success: true, fixedBills, fixedReadings, message: `Fixed ${fixedBills} bills and ${fixedReadings} readings` });
 });
 
 // POST /api/bills/:id/mark-paid  (admin only) — record a payment the admin
@@ -664,7 +771,7 @@ router.post("/readings", authMiddleware("admin", ["officer"]), (req, res) => {
   if (typeof cm3 !== "number" || !Number.isFinite(cm3) || cm3 < 0) {
     return res.status(400).json({ error: "cm3 must be a non-negative number." });
   }
-  if (typeof flowRate !== "number" || !Number.isFinite(flowRate) || flowRate < 0) {
+  if (flowRate !== undefined && (typeof flowRate !== "number" || !Number.isFinite(flowRate) || flowRate < 0)) {
     return res.status(400).json({ error: "flowRate must be a non-negative number." });
   }
   if (flowType !== undefined && !["Normal", "High flow"].includes(flowType)) {
@@ -683,7 +790,7 @@ router.post("/readings", authMiddleware("admin", ["officer"]), (req, res) => {
 
   db.prepare(
     `INSERT INTO readings (household_id, cm3, flow_rate, flow_type, source) VALUES (?, ?, ?, ?, 'manual')`
-  ).run(householdId, cm3, flowRate, flowType || "Normal");
+  ).run(householdId, cm3, flowRate ?? 0, flowType || "Normal");
 
   recordAudit(req, "reading.manual_entry", householdId, `Manually recorded a ${cm3} CM³ reading for ${householdId}`);
   res.json({ success: true });

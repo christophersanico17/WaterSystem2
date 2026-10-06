@@ -254,10 +254,17 @@ export async function fetchBillingPeriods() {
   return request("/bills/periods");
 }
 
-export async function generateBills(period) {
+export async function generateBills(period, force) {
   return request("/bills/generate", {
     method: "POST",
-    body: { period },
+    body: { period, force },
+    auth: "admin",
+  });
+}
+
+export async function fixMeterReadings() {
+  return request("/bills/fix-prev-readings", {
+    method: "POST",
     auth: "admin",
   });
 }
@@ -351,6 +358,14 @@ export async function fetchReadings(householdId) {
 
 export async function fetchLatestReading(meterNo) {
   return request(`/readings/latest/${encodeURIComponent(meterNo)}`, { auth: activeAuthRole() });
+}
+
+export async function submitManualReading(householdId, cm3) {
+  return request("/readings", {
+    method: "POST",
+    body: { householdId, cm3 },
+    auth: "admin",
+  });
 }
 
 // ── Alerts ───────────────────────────────────────────────────
