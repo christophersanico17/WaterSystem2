@@ -46,6 +46,7 @@ export function residentToHousehold(resident, latestBill, reading, allBills = []
   const paymentMethod = latestBill ? latestBill.payment_method : null;
   const rawPaymentRef = latestBill ? latestBill.payment_ref : null;
   const paymentReference = rawPaymentRef?.startsWith("QR:") ? rawPaymentRef.slice(3) : null;
+  const paymentRejectionReason = latestBill ? latestBill.payment_rejection_reason : null;
   const paymentStamp =
     latestBill && latestBill.payment_method === "GCash"
       ? {
@@ -86,6 +87,7 @@ export function residentToHousehold(resident, latestBill, reading, allBills = []
     paymentStatus,
     paymentMethod,
     paymentReference,
+    paymentRejectionReason,
     paymentStamp,
 
     lastFlow: reading ? reading.flow_rate : 0,

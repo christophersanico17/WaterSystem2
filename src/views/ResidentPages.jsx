@@ -1262,6 +1262,22 @@ export function ResidentPayments({ me, startGcashPayment }) {
         </div>
       )}
 
+      {/* Payment rejected by admin */}
+      {me.paymentStatus === "Unpaid" && me.paymentRejectionReason && (
+        <div className="rounded-lg px-4 py-3 mb-4 border bg-rose-50 border-rose-200">
+          <div className="text-[13px] font-semibold text-rose-800 mb-1.5">GCash payment rejected</div>
+          <div className="text-xs text-rose-700 mb-3">
+            <strong>Reason:</strong> {me.paymentRejectionReason}
+          </div>
+          <button
+            onClick={() => openPaymentModal(me.id)}
+            className="text-xs bg-rose-600 hover:bg-rose-700 text-white font-semibold px-3 py-1.5 rounded-md transition"
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
       {/* Cash Pending — resident declared intent to pay in person, waiting on
           an admin to confirm they've actually received the cash. */}
       {me.paymentStatus === "Cash Pending" && (
